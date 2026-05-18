@@ -109,7 +109,7 @@ function RawEmailView({ email }) {
 }
 
 /* ─── AI extraction panel ───────────────────────────────────── */
-function AIExtractionView({ email, onSendToQueue, editState, setEditState, departments, zones, projects }) {
+function AIExtractionView({ email, onSendToQueue, editState, setEditState, departments }) {
   const ai = email.aiExtracted;
   if (!ai) return null;
 
@@ -154,9 +154,9 @@ function AIExtractionView({ email, onSendToQueue, editState, setEditState, depar
             { icon: User,      label: 'Customer',   key: 'customerName',        type: 'text' },
             { icon: Tag,       label: 'Severity',   key: 'suggestedSeverity',   type: 'select', opts: ['Fatal','Critical','Medium','Low'] },
             { icon: Building2, label: 'Department', key: 'suggestedDepartment', type: 'select', opts: departments },
-            { icon: MapPin,    label: 'Zone',       key: 'suggestedZone',       type: 'select', opts: zones },
+            { icon: MapPin,    label: 'Zone',       key: 'suggestedZone',       type: 'text' },
             { icon: Tag,       label: 'Type',       key: 'suggestedType',       type: 'select', opts: ['Structural','Quality','Legal','Safety','Documentation','Maintenance','Financial','Other'] },
-            { icon: Building2, label: 'Project',    key: 'project', type: 'select', opts: projects, val: editState.project },
+            { icon: Building2, label: 'Project Name', key: 'project', type: 'text' },
           ].map(({ icon: Icon, label, key, type, opts }) => {
             const val = key === 'project' ? editState.project : (editState[key] ?? ai[key]);
             return (
@@ -255,16 +255,12 @@ export default function EmailInbox() {
   const [editState, setEditState]   = useState({});
   const [search, setSearch]         = useState('');
   const [departments, setDepartments] = useState([]);
-  const [zones, setZones]             = useState([]);
-  const [projects, setProjects]       = useState([]);
 
   // Fetch emails from backend on mount
   useEffect(() => {
     configAPI.enums().then(r => {
       if (r.success) {
         setDepartments(r.data.departments || []);
-        setZones(r.data.zones || []);
-        setProjects(r.data.projects || []);
       }
     }).catch(() => {});
     emailsAPI.getAll().then(res => {
@@ -495,7 +491,7 @@ export default function EmailInbox() {
 
               {/* Action button */}
               <div className="ml-4 flex-shrink-0">
-                {liveSelected.aiStatus === 'pending' && (
+                {['pending', 'extracted'].includes(liveSelected.aiStatus) && (
                   <Button variant="primary" size="sm" icon={Sparkles}
                     onClick={() => handleProcessAI(liveSelected.id)}
                     disabled={processingId === liveSelected.id}
@@ -505,7 +501,7 @@ export default function EmailInbox() {
                         <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
                         AI Processing…
                       </span>
-                    ) : 'Process with AI'}
+                    ) : liveSelected.aiStatus === 'extracted' ? 'Re-run AI Analysis' : 'Process with AI'}
                   </Button>
                 )}
                 {liveSelected.aiStatus === 'queued' && (
@@ -570,8 +566,6 @@ export default function EmailInbox() {
                       editState={editState}
                       setEditState={setEditState}
                       departments={departments}
-                      zones={zones}
-                      projects={projects}
                     />
                   )}
                   {activeTab === 'ai' && !liveSelected.aiExtracted && (
@@ -597,4 +591,3 @@ export default function EmailInbox() {
     </Layout>
   );
 }
-
