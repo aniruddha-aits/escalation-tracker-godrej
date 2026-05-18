@@ -16,8 +16,8 @@ async function request(url, opts = {}) {
   const res = await fetch(url, { ...opts, headers });
   if (res.status === 401) {
     clearToken();
-    alert("Session expired. Please login again.");
-    window.location.href = '/login';
+    // alert("Session expired. Please login again.");
+    // window.location.href = '/login';
     throw new Error('Unauthorized');
   }
   const data = await res.json();
