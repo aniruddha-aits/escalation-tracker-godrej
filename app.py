@@ -61,8 +61,28 @@ def _extract_sender(from_header):
 def handle_new_email(subject, body, from_header=""):
     log.info(f"Processing email: {subject[:80]}")
     from_name, from_email = _extract_sender(from_header)
-    result = ai_processor.analyze_email(subject, body)
+    result = ai_processor.analyze_email(subject, body, from_name=from_name, from_email=from_email)
     database.save_email(from_email=from_email, from_name=from_name, subject=subject, body=body, ai_data=result)
+
+def _complaint_payload_for_user(complaint, user):
+    data = complaint.to_dict()
+    if complaint.assignedTo != user.id:
+        data["cbeDate"] = None
+    return data
+
+def _email_payload_with_customer(email_data):
+    ai_data = email_data.get("ai_data") or {}
+    if isinstance(ai_data, dict) and not ai_data.get("customerName"):
+        customer = ai_processor.extract_customer_details(
+            email_data.get("subject", ""),
+            email_data.get("body", ""),
+            email_data.get("from_name", ""),
+            email_data.get("from_email", ""),
+            issue_details=ai_data.get("issueDetails", ""),
+        )
+        ai_data = {**ai_data, **customer}
+        email_data = {**email_data, "ai_data": ai_data}
+    return email_data
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
 
@@ -109,7 +129,7 @@ def api_get_complaints():
     if g.current_user.role == "Department User":
         filters["assignedTo"] = g.current_user.id
     complaints = database.get_all_complaints(filters)
-    return jsonify({"success": True, "data": [c.to_dict() for c in complaints]})
+    return jsonify({"success": True, "data": [_complaint_payload_for_user(c, g.current_user) for c in complaints]})
 
 @app.route("/api/complaints", methods=["POST"])
 @token_required
@@ -126,12 +146,19 @@ def api_get_complaint(cid):
     c = database.get_complaint_by_id(cid)
     if not c:
         return jsonify({"success": False, "message": "Not found"}), 404
-    return jsonify({"success": True, "data": c.to_dict()})
+    return jsonify({"success": True, "data": _complaint_payload_for_user(c, g.current_user)})
 
 @app.route("/api/complaints/<cid>", methods=["PUT"])
 @token_required
 def api_update_complaint(cid):
-    database.update_complaint(cid, request.json or {})
+    data = request.json or {}
+    if "cbeDate" in data:
+        c = database.get_complaint_by_id(cid)
+        if not c:
+            return jsonify({"success": False, "message": "Not found"}), 404
+        if c.assignedTo != g.current_user.id:
+            return jsonify({"success": False, "message": "Only the assigned user can update CBE Date"}), 403
+    database.update_complaint(cid, data)
     return jsonify({"success": True, "message": "Updated"})
 
 @app.route("/api/complaints/<cid>", methods=["DELETE"])
@@ -159,7 +186,6 @@ def api_assign_complaint(cid):
     updates = {"status": "Assigned"}
     if data.get("department"): updates["department"] = data["department"]
     if data.get("assignedTo"): updates["assignedTo"] = data["assignedTo"]
-    if data.get("cbeDate"): updates["cbeDate"] = data["cbeDate"]
     database.update_complaint(cid, updates)
     database.create_notification("ASSIGNMENT", cid, data.get("assignedTo",""),
         "New Complaint Assigned", f"{cid} has been assigned.", data.get("severity","Medium"))
@@ -260,7 +286,7 @@ def api_ai_classify():
 @token_required
 def api_emails():
     emails = database.get_all_emails()
-    return jsonify({"success": True, "data": emails, "total": len(emails)})
+    return jsonify({"success": True, "data": [_email_payload_with_customer(e) for e in emails], "total": len(emails)})
 
 @app.route("/api/emails/sync", methods=["POST"])
 @token_required
@@ -296,7 +322,7 @@ def api_sync_emails():
                 exists = conn.execute("SELECT COUNT(*) FROM emails WHERE subject=? AND from_email=?", (subject, from_email)).fetchone()[0]
             if exists > 0:
                 continue
-            result = ai_processor.analyze_email(subject, body)
+            result = ai_processor.analyze_email(subject, body, from_name=from_name, from_email=from_email)
             database.save_email(from_email=from_email, from_name=from_name, subject=subject, body=body, ai_data=result)
             fetched += 1
         mail.logout()
@@ -311,7 +337,12 @@ def api_process_email_ai(eid):
     em = database.get_email_by_id(eid)
     if not em:
         return jsonify({"success": False, "message": "Not found"}), 404
-    result = ai_processor.analyze_email(em.get("subject",""), em.get("body",""))
+    result = ai_processor.analyze_email(
+        em.get("subject",""),
+        em.get("body",""),
+        from_name=em.get("from_name",""),
+        from_email=em.get("from_email",""),
+    )
     database.update_email_ai_data(eid, result)
     return jsonify({"success": True, "data": result})
 

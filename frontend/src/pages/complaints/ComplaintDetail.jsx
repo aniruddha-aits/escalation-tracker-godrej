@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, MapPin, Calendar, Clock, Tag, User, Building2, Mail,
   MessageSquare, CheckCircle2, AlertCircle, Send, Paperclip, ExternalLink,
+  Save,
 } from 'lucide-react';
 import { Layout } from '../../components/layout/Layout';
 import { SeverityBadge, StatusBadge, Badge } from '../../components/ui/Badge';
@@ -76,6 +77,11 @@ export default function ComplaintDetail() {
   const [selectedDept, setSelectedDept] = useState('');
   const [selectedUser, setSelectedUser] = useState('');
   const [cbeDate, setCbeDate]          = useState('');
+  const [cbeSaving, setCbeSaving]      = useState(false);
+
+  useEffect(() => {
+    setCbeDate(c?.cbeDate ? c.cbeDate.slice(0, 10) : '');
+  }, [c?.id, c?.cbeDate]);
 
   if (!c) return (
     <Layout title="Not Found">
@@ -87,6 +93,7 @@ export default function ComplaintDetail() {
   const validator = users.find(u => u.id === c.validatedBy);
   const rcaDue   = new Date(c.rcaDue);
   const slaBreach = c.status !== 'Closed' && c.rca === null && rcaDue < new Date();
+  const isAssignedUser = c.assignedTo === currentUser.id;
 
   const postAction = async () => {
     if (!actionText.trim()) return;
@@ -99,11 +106,20 @@ export default function ComplaintDetail() {
     await complaintsAPI.assign(c.id, {
       department: selectedDept || c.department,
       assignedTo: selectedUser || c.assignedTo,
-      cbeDate: cbeDate || null,
       severity: c.severity,
     });
     await fetchComplaints();
     setAssignModal(false);
+  };
+
+  const saveCbeDate = async () => {
+    setCbeSaving(true);
+    try {
+      await complaintsAPI.update(c.id, { cbeDate: cbeDate || null });
+      await fetchComplaints();
+    } finally {
+      setCbeSaving(false);
+    }
   };
 
   const doClosure = async (type) => {
@@ -241,7 +257,30 @@ export default function ComplaintDetail() {
             <InfoRow icon={Tag}       label="Source"       value={c.source} />
             <InfoRow icon={Building2} label="Department"   value={c.department} />
             <InfoRow icon={User}      label="Assigned To"  value={assignee?.name} />
-            {c.cbeDate && <InfoRow icon={Clock} label="CBE Date" value={format(new Date(c.cbeDate), 'dd MMM yyyy')} />}
+            {isAssignedUser && (
+              <div className="flex items-start gap-2.5">
+                <Clock className="w-3.5 h-3.5 text-slate-400 mt-0.5 flex-shrink-0" />
+                <div className="flex-1">
+                  <p className="text-[10px] text-slate-400 uppercase tracking-wide">CBE Date</p>
+                  {c.cbeDate && (
+                    <p className="text-xs font-medium text-slate-700 mt-0.5 mb-2">
+                      {format(new Date(c.cbeDate), 'dd MMM yyyy')}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <input
+                      type="date"
+                      value={cbeDate}
+                      onChange={e => setCbeDate(e.target.value)}
+                      className="min-w-0 flex-1 px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <Button variant="primary" size="sm" icon={Save} onClick={saveCbeDate} disabled={cbeSaving}>
+                      {cbeSaving ? 'Saving' : 'Save'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
             {c.mailThread && (
               <a href={c.mailThread} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-xs text-blue-600 hover:underline">
                 <ExternalLink className="w-3.5 h-3.5" /> View Mail Thread
@@ -326,11 +365,6 @@ export default function ComplaintDetail() {
                 <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
               ))}
             </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1.5">CBE Date</label>
-            <input type="date" value={cbeDate} onChange={e => setCbeDate(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
           <p className="text-xs text-slate-400">All watchers and mail thread participants will receive a notification.</p>
           <div className="flex gap-2 pt-2">

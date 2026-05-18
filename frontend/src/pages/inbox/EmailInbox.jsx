@@ -282,6 +282,7 @@ export default function EmailInbox() {
   useEffect(() => {
     setEditState({
       customerName:       selected?.aiExtracted?.customerName ?? '',
+      customerEmail:      selected?.aiExtracted?.customerEmail ?? '',
       suggestedSeverity:  selected?.aiExtracted?.suggestedSeverity ?? selected?.aiExtracted?.priority ?? 'Medium',
       suggestedDepartment: selected?.aiExtracted?.suggestedDepartment ?? selected?.aiExtracted?.department ?? '',
       suggestedZone:      selected?.aiExtracted?.suggestedZone ?? selected?.aiExtracted?.zone ?? '',
@@ -289,7 +290,7 @@ export default function EmailInbox() {
       project:            selected?.aiExtracted?.project ?? '',
       issueDetails:       selected?.aiExtracted?.issueDetails ?? '',
     });
-  }, [selected?.id]);
+  }, [selected?.id, selected?.aiExtracted]);
 
   const handleSelect = (email) => {
     setSelected(email);
@@ -342,6 +343,18 @@ export default function EmailInbox() {
         };
         setEmails(prev => prev.map(e => e.id === emailId ? { ...e, aiStatus: 'extracted', aiExtracted: extracted } : e));
         setSelected(prev => prev?.id === emailId ? { ...prev, aiStatus: 'extracted', aiExtracted: extracted } : prev);
+        if (selected?.id === emailId) {
+          setEditState({
+            customerName: extracted.customerName,
+            customerEmail: extracted.customerEmail,
+            suggestedSeverity: extracted.suggestedSeverity,
+            suggestedDepartment: extracted.suggestedDepartment,
+            suggestedZone: extracted.suggestedZone,
+            suggestedType: extracted.suggestedType,
+            project: extracted.project,
+            issueDetails: extracted.issueDetails,
+          });
+        }
       }
     } catch (err) { console.error('AI process error:', err); }
     setProcessingId(null);

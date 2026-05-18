@@ -48,6 +48,14 @@ Rules:
 - Department must be exactly one of: ["Quality", "Legal", "Operations", "Maintenance", "Finance", "Safety", "IT", "Other"]
 - "Issue Details" MUST be 3-5 sentences long. Include: what the problem is, where it is happening (project/location), who reported it, what is the impact or urgency, and any specific items or defects mentioned. Do NOT make it a single short phrase.
 - Provide a brief reason for the assigned priority in "Priority Reason".
+- Extract the customer's name in "Customer Name". Prefer an explicit name from the email body or signature. If the body does not mention a customer name, use the sender display name. If no reliable name is available, use "Unknown".
+- Extract the customer's email address in "Customer Email". Prefer an explicit email in the body. If missing, use the sender email. If no reliable email is available, use "Unknown".
+
+EMAIL FROM NAME:
+{EMAIL_FROM_NAME}
+
+EMAIL FROM ADDRESS:
+{EMAIL_FROM_EMAIL}
 
 EMAIL SUBJECT:
 {EMAIL_SUBJECT}
@@ -63,6 +71,8 @@ Required JSON format:
   "Zone": "string",
   "Department": "string",
   "AssignedTo": "string",
+  "Customer Name": "string",
+  "Customer Email": "string",
   "Issue Details": "string",
   "Priority Reason": "string"
 }}
@@ -82,6 +92,16 @@ KNOWN_PROJECTS = [
 ]
 
 UNKNOWN_VALUES = {"", "unknown", "n/a", "na", "none", "not mentioned", "not specified"}
+
+CONSUMER_EMAIL_DOMAINS = {
+    "gmail.com", "yahoo.com", "yahoo.co.in", "hotmail.com", "outlook.com",
+    "live.com", "icloud.com", "rediffmail.com", "protonmail.com",
+}
+
+INTERNAL_EMAIL_DOMAINS = {
+    "godrejproperties.com",
+    "godrej.com",
+}
 
 
 def _clean_response(text: str) -> str:
@@ -149,12 +169,131 @@ def _infer_zone(text: str) -> str:
     return "Unknown"
 
 
-def _fallback_analysis(subject: str, body: str) -> dict:
+def _clean_person_name(value: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", value or "")
+    value = re.sub(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b", " ", value)
+    value = re.sub(r"\b(?:mailto|from|sent|to|cc|subject)\b\s*:?", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"[^A-Za-z .'-]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" .'-")
+    if not value or value.lower() in UNKNOWN_VALUES:
+        return "Unknown"
+    blocked = {"customer", "care", "secretarial", "nri", "public", "team", "support", "info"}
+    words = [w for w in value.split() if w.lower() not in blocked]
+    if len(words) < 2:
+        return "Unknown"
+    return " ".join(words[:4]).title()
+
+
+def _email_domain(email: str) -> str:
+    if "@" not in (email or ""):
+        return ""
+    return email.rsplit("@", 1)[1].lower().strip()
+
+
+def _extract_forwarded_senders(text: str) -> list[dict]:
+    senders = []
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped.lower().startswith("from:"):
+            continue
+        emails = re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", stripped)
+        if not emails:
+            continue
+        email = emails[0]
+        name_part = stripped[5:].split(email, 1)[0]
+        name = _clean_person_name(name_part)
+        if name != "Unknown" or email:
+            senders.append({"name": name, "email": email})
+    return senders
+
+
+def extract_customer_details(subject: str = "", body: str = "", from_name: str = "", from_email: str = "", issue_details: str = "") -> dict:
+    source_text = f"{subject or ''}\n{body or ''}"
+    forwarded_senders = _extract_forwarded_senders(source_text)
+
+    for sender in forwarded_senders:
+        domain = _email_domain(sender["email"])
+        if domain in CONSUMER_EMAIL_DOMAINS and sender["name"] != "Unknown":
+            return {"customerName": sender["name"], "customerEmail": sender["email"] or "Unknown"}
+
+    for sender in reversed(forwarded_senders):
+        domain = _email_domain(sender["email"])
+        if domain and domain not in INTERNAL_EMAIL_DOMAINS and sender["name"] != "Unknown":
+            return {"customerName": sender["name"], "customerEmail": sender["email"] or "Unknown"}
+
+    subject_name = _infer_customer_from_subject(subject)
+    if subject_name != "Unknown":
+        return {"customerName": subject_name, "customerEmail": _infer_customer_email(source_text, from_email)}
+
+    name = _infer_customer_name(f"{source_text}\n{issue_details or ''}", from_name)
+    email = _infer_customer_email(source_text, from_email)
+    return {"customerName": name, "customerEmail": email}
+
+
+def _infer_customer_from_subject(subject: str) -> str:
+    patterns = [
+        r"\bfrom\s+([A-Za-z][A-Za-z .'-]{1,50})\s*$",
+        r"\bby\s+([A-Za-z][A-Za-z .'-]{1,50})\s*$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, subject or "", flags=re.IGNORECASE)
+        if not match:
+            continue
+        raw_name = re.sub(r"[^A-Za-z .'-]", " ", match.group(1))
+        raw_name = re.sub(r"\s+", " ", raw_name).strip(" .'-")
+        if raw_name and raw_name.lower() not in UNKNOWN_VALUES:
+            return raw_name.title()
+    return "Unknown"
+
+
+def _infer_customer_name(text: str, from_name: str = "") -> str:
+    patterns = [
+        r"\b(?:customer\s*name|client\s*name|name)\s*(?:is|=|:|-)\s*([A-Z][A-Za-z .'-]{1,60})",
+        r"\b(?:customer|client|flat\s*owner|home\s*buyer|complainant)\s*,\s*([A-Z][A-Za-z .'-]{2,60})\b",
+        r"\b(?:customer|client|flat\s*owner|home\s*buyer|complainant)\s+(?:named|called|is)\s+([A-Z][A-Za-z .'-]{2,60})\b",
+        r"\b(?:reported by|raised by|complaint from|mail from)\s+([A-Z][A-Za-z .'-]{2,60})\b",
+        r"\b(?:I am|I'm|my name is|this is)\s+([A-Z][A-Za-z .'-]{2,60})\b",
+        r"\b(?:regards|thanks|thank you|sincerely|best)\s*,?\s*\n\s*([A-Z][A-Za-z .'-]{1,60})",
+        r"\b(?:Rgs|Rgds)\s*,?\s*\n\s*([A-Z][A-Za-z .'-]{1,60})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        name = _clean_person_name(re.split(r"[,;\n\r<>]", match.group(1).strip())[0])
+        if name != "Unknown":
+            return name
+
+    cleaned = _clean_person_name(from_name)
+    if cleaned != "Unknown":
+        return cleaned
+    return "Unknown"
+
+
+def _infer_customer_email(text: str, from_email: str = "") -> str:
+    emails = re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text or "")
+    for email in emails:
+        if _email_domain(email) in CONSUMER_EMAIL_DOMAINS:
+            return email
+    cleaned = (from_email or "").strip()
+    if cleaned and cleaned.lower() not in UNKNOWN_VALUES:
+        return cleaned
+    for email in emails:
+        if _email_domain(email) not in INTERNAL_EMAIL_DOMAINS:
+            return email
+    if emails:
+        return emails[0]
+    return "Unknown"
+
+
+def _fallback_analysis(subject: str, body: str, from_name: str = "", from_email: str = "") -> dict:
     source_text = f"{subject or ''}\n{body or ''}"
     project = _infer_project(source_text)
     if _is_unknown(project):
         project = _infer_project_from_subject(subject)
     zone = _infer_zone(source_text)
+    customer = extract_customer_details(subject, body, from_name, from_email)
     issue = (body or "").strip()
     if len(issue) < 30:
         issue = f"Complaint received from email subject: {subject or 'No subject'}."
@@ -165,6 +304,8 @@ def _fallback_analysis(subject: str, body: str) -> dict:
         "zone":           zone,
         "department":     "Quality",
         "assignedTo":     "",
+        "customerName":   customer["customerName"],
+        "customerEmail":  customer["customerEmail"],
         "issueDetails":   issue[:1200],
         "priorityReason": "AI service failed, so default priority was assigned by fallback extraction."
     }
@@ -197,7 +338,7 @@ def _call_gemini(prompt: str) -> str:
     raise last_error or RuntimeError("All Gemini models failed")
 
 
-def analyze_email(subject: str, body: str) -> dict:
+def analyze_email(subject: str, body: str, from_name: str = "", from_email: str = "") -> dict:
     """
     Call Gemini and return a normalised escalation dict:
     {
@@ -207,12 +348,16 @@ def analyze_email(subject: str, body: str) -> dict:
         "zone":               str,
         "department":         str,
         "assignedTo":         str,
+        "customerName":       str,
+        "customerEmail":      str,
         "issueDetails":       str,
         "priorityReason":     str
     }
     Never raises — returns a fallback dict on any error.
     """
     prompt = PROMPT_TEMPLATE.format(
+        EMAIL_FROM_NAME=from_name or "Unknown",
+        EMAIL_FROM_EMAIL=from_email or "Unknown",
         EMAIL_SUBJECT=subject or "(no subject)",
         EMAIL_BODY=(body or "(empty body)")[:6000],  # guard against huge emails
     )
@@ -231,6 +376,17 @@ def analyze_email(subject: str, body: str) -> dict:
             project = _infer_project(source_text)
         if _is_unknown(zone):
             zone = _infer_zone(source_text)
+        customer_name = data.get("Customer Name", "Unknown")
+        customer_email = data.get("Customer Email", "Unknown")
+        issue_details = data.get("Issue Details", "No description extracted.")
+        deterministic_customer = extract_customer_details(
+            subject, body, from_name, from_email, issue_details=issue_details
+        )
+        deterministic_domain = _email_domain(deterministic_customer["customerEmail"])
+        if _is_unknown(customer_name) or deterministic_domain in CONSUMER_EMAIL_DOMAINS:
+            customer_name = deterministic_customer["customerName"]
+        if _is_unknown(customer_email) or deterministic_domain in CONSUMER_EMAIL_DOMAINS:
+            customer_email = deterministic_customer["customerEmail"]
 
         return {
             "project":        project,
@@ -239,7 +395,9 @@ def analyze_email(subject: str, body: str) -> dict:
             "zone":           zone,
             "department":     data.get("Department", "Other"),
             "assignedTo":     data.get("AssignedTo", ""),
-            "issueDetails":   data.get("Issue Details", "No description extracted."),
+            "customerName":   customer_name,
+            "customerEmail":  customer_email,
+            "issueDetails":   issue_details,
             "priorityReason": data.get("Priority Reason", "")
         }
 
@@ -249,7 +407,7 @@ def analyze_email(subject: str, body: str) -> dict:
         log.error(f"Gemini API error: {exc}")
 
     # Fallback — always return something storable
-    return _fallback_analysis(subject, body)
+    return _fallback_analysis(subject, body, from_name, from_email)
 
 
 # ── RCA/CAPA AI Rephrase ─────────────────────────────────────────────────────
