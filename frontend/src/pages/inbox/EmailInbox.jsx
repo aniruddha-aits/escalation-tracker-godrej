@@ -191,6 +191,7 @@ function AIExtractionView({ email, onSendToQueue, editState, setEditState, depar
             value={editState.issueDetails ?? ai.issueDetails}
             onChange={e => setEditState(p => ({ ...p, issueDetails: e.target.value }))}
             className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white resize-none"
+            style={{height: "150px"}}
           />
         </div>
       </div>
@@ -446,7 +447,7 @@ export default function EmailInbox() {
       </div>
 
       {/* ── Split panel ── */}
-      <div className="flex gap-4 h-[calc(100vh-240px)]">
+      <div className="flex gap-4 h-[calc(100vh-200px)]">
 
         {/* LEFT — email list */}
         <div className="w-80 flex-shrink-0 bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col overflow-hidden relative">
