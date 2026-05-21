@@ -51,6 +51,8 @@ export const complaintsAPI = {
   assign: (id, data) => request(`/api/complaints/${id}/assign`, { method: 'POST', body: JSON.stringify(data) }),
   validate: (id, data) => request(`/api/complaints/${id}/validate`, { method: 'POST', body: JSON.stringify(data) }),
   reject: (id) => request(`/api/complaints/${id}/reject`, { method: 'POST' }),
+  approveCbe: (id) => request(`/api/complaints/${id}/cbe/approve`, { method: 'POST' }),
+  rejectCbe: (id, reason) => request(`/api/complaints/${id}/cbe/reject`, { method: 'POST', body: JSON.stringify({ reason: reason || '' }) }),
   aiClassify: (text) => request('/api/complaints/ai-classify', { method: 'POST', body: JSON.stringify({ text }) }),
 };
 

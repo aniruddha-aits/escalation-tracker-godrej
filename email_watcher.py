@@ -73,6 +73,21 @@ def _strip_html(html: str) -> str:
     return txt.strip()
 
 
+def parse_email_date(date_str: str) -> str:
+    import email.utils
+    import datetime
+    try:
+        if date_str:
+            d = email.utils.parsedate_to_datetime(date_str)
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=datetime.timezone.utc)
+            return d.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except Exception:
+        pass
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
 def _extract_body(msg: email.message.Message) -> str:
     plain, html = [], []
     if msg.is_multipart():
@@ -163,6 +178,7 @@ def _fetch_emails_after(mail: imaplib.IMAP4_SSL, last_uid: int) -> tuple[list[di
             "body":        _extract_body(msg),
             "from":        _decode_header(msg.get("From", "")),
             "from_header": _decode_header(msg.get("From", "")),
+            "date":        msg.get("Date"),
         })
 
     new_max = int(new_uids[-1]) if new_uids else last_uid
@@ -241,7 +257,8 @@ def _watch_loop(
                 for em in new_emails:
                     log.info(f"New email: {em['subject']}")
                     try:
-                        on_new_email(em["subject"], em["body"], from_header=em.get("from_header", ""))
+                        parsed_date = parse_email_date(em.get("date"))
+                        on_new_email(em["subject"], em["body"], from_header=em.get("from_header", ""), received_at=parsed_date)
                     except Exception as cb_exc:
                         log.error(f"Callback error: {cb_exc}")
 

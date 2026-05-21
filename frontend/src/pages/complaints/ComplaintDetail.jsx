@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, MapPin, Calendar, Clock, Tag, User, Building2, Mail,
   MessageSquare, CheckCircle2, AlertCircle, Send, Paperclip, ExternalLink,
-  Save,
+  Save, XCircle, ThumbsUp,
 } from 'lucide-react';
 import { Layout } from '../../components/layout/Layout';
 import { SeverityBadge, StatusBadge, Badge } from '../../components/ui/Badge';
@@ -90,10 +90,17 @@ export default function ComplaintDetail() {
   );
 
   const assignee = users.find(u => u.id === c.assignedTo);
+  const assigner = users.find(u => u.id === c.assignedBy);
   const validator = users.find(u => u.id === c.validatedBy);
   const rcaDue   = new Date(c.rcaDue);
   const slaBreach = c.status !== 'Closed' && c.rca === null && rcaDue < new Date();
   const isAssignedUser = c.assignedTo === currentUser.id;
+  const isAssigner = c.assignedBy === currentUser.id || currentUser.role === 'Admin';
+
+  const [cbeRejectModal, setCbeRejectModal] = useState(false);
+  const [cbeRejectReason, setCbeRejectReason] = useState('');
+  const [cbeApproving, setCbeApproving] = useState(false);
+  const [cbeRejecting, setCbeRejecting] = useState(false);
 
   const postAction = async () => {
     if (!actionText.trim()) return;
@@ -119,6 +126,28 @@ export default function ComplaintDetail() {
       await fetchComplaints();
     } finally {
       setCbeSaving(false);
+    }
+  };
+
+  const approveCbe = async () => {
+    setCbeApproving(true);
+    try {
+      await complaintsAPI.approveCbe(c.id);
+      await fetchComplaints();
+    } finally {
+      setCbeApproving(false);
+    }
+  };
+
+  const rejectCbe = async () => {
+    setCbeRejecting(true);
+    try {
+      await complaintsAPI.rejectCbe(c.id, cbeRejectReason);
+      await fetchComplaints();
+      setCbeRejectModal(false);
+      setCbeRejectReason('');
+    } finally {
+      setCbeRejecting(false);
     }
   };
 
@@ -257,27 +286,82 @@ export default function ComplaintDetail() {
             <InfoRow icon={Tag}       label="Source"       value={c.source} />
             <InfoRow icon={Building2} label="Department"   value={c.department} />
             <InfoRow icon={User}      label="Assigned To"  value={assignee?.name} />
-            {isAssignedUser && (
+            {assigner && <InfoRow icon={User} label="Assigned By" value={assigner?.name} />}
+
+            {/* ── CBE Date Section ── */}
+            {(isAssignedUser || isAssigner) && (
               <div className="flex items-start gap-2.5">
                 <Clock className="w-3.5 h-3.5 text-slate-400 mt-0.5 flex-shrink-0" />
                 <div className="flex-1">
-                  <p className="text-[10px] text-slate-400 uppercase tracking-wide">CBE Date</p>
-                  {c.cbeDate && (
-                    <p className="text-xs font-medium text-slate-700 mt-0.5 mb-2">
+                  <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">CBE Date</p>
+
+                  {/* Status badge */}
+                  {c.cbeStatus === 'pending' && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-amber-50 text-amber-700 border border-amber-200 mb-2">
+                      <Clock className="w-3 h-3" /> Pending Approval
+                    </span>
+                  )}
+                  {c.cbeStatus === 'approved' && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 mb-2">
+                      <CheckCircle2 className="w-3 h-3" /> Approved{c.cbeApprovedBy ? ` by ${users.find(u => u.id === c.cbeApprovedBy)?.name || 'Authority'}` : ''}
+                    </span>
+                  )}
+                  {c.cbeStatus === 'rejected' && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full bg-red-50 text-red-700 border border-red-200 mb-2">
+                      <XCircle className="w-3 h-3" /> Rejected — Please resubmit
+                    </span>
+                  )}
+
+                  {/* Show current approved date */}
+                  {c.cbeDate && c.cbeStatus === 'approved' && (
+                    <p className="text-xs font-medium text-emerald-700 mt-0.5 mb-2">
                       {format(new Date(c.cbeDate), 'dd MMM yyyy')}
                     </p>
                   )}
-                  <div className="flex gap-2">
-                    <input
-                      type="date"
-                      value={cbeDate}
-                      onChange={e => setCbeDate(e.target.value)}
-                      className="min-w-0 flex-1 px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                    <Button variant="primary" size="sm" icon={Save} onClick={saveCbeDate} disabled={cbeSaving}>
-                      {cbeSaving ? 'Saving' : 'Save'}
-                    </Button>
-                  </div>
+
+                  {/* Show pending date for assigner to review */}
+                  {c.cbeDate && c.cbeStatus === 'pending' && isAssigner && !isAssignedUser && (
+                    <p className="text-xs font-medium text-amber-700 mt-0.5 mb-2">
+                      Proposed: {format(new Date(c.cbeDate), 'dd MMM yyyy')}
+                      {c.cbeSubmittedBy && (
+                        <span className="text-slate-400 font-normal"> by {users.find(u => u.id === c.cbeSubmittedBy)?.name || 'User'}</span>
+                      )}
+                    </p>
+                  )}
+
+                  {/* Show pending date for assignee */}
+                  {c.cbeDate && c.cbeStatus === 'pending' && isAssignedUser && (
+                    <p className="text-xs font-medium text-amber-700 mt-0.5 mb-2">
+                      Submitted: {format(new Date(c.cbeDate), 'dd MMM yyyy')}
+                    </p>
+                  )}
+
+                  {/* Assignee: date picker to set/resubmit CBE Date */}
+                  {isAssignedUser && c.status !== 'Closed' && (c.cbeStatus !== 'pending') && (
+                    <div className="flex gap-2 mt-1">
+                      <input
+                        type="date"
+                        value={cbeDate}
+                        onChange={e => setCbeDate(e.target.value)}
+                        className="min-w-0 flex-1 px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <Button variant="primary" size="sm" icon={Save} onClick={saveCbeDate} disabled={cbeSaving}>
+                        {cbeSaving ? 'Saving' : c.cbeStatus === 'rejected' ? 'Resubmit' : 'Submit'}
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Assigner: Approve / Reject buttons */}
+                  {isAssigner && !isAssignedUser && c.cbeStatus === 'pending' && (
+                    <div className="flex gap-2 mt-2">
+                      <Button variant="success" size="sm" icon={ThumbsUp} onClick={approveCbe} disabled={cbeApproving}>
+                        {cbeApproving ? 'Approving…' : 'Approve'}
+                      </Button>
+                      <Button variant="danger" size="sm" icon={XCircle} onClick={() => setCbeRejectModal(true)}>
+                        Reject
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -389,6 +473,26 @@ export default function ComplaintDetail() {
               <p className="text-xs font-semibold text-emerald-700">Hard Closure</p>
               <p className="text-[10px] text-emerald-600 mt-0.5">Customer confirmed or no re-escalation received</p>
             </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* CBE Reject Reason Modal */}
+      <Modal open={cbeRejectModal} onClose={() => setCbeRejectModal(false)} title="Reject CBE Date" size="sm">
+        <div className="space-y-4">
+          <p className="text-xs text-slate-600">Please provide a reason for rejecting the proposed CBE Date. The assignee will be notified.</p>
+          <textarea
+            value={cbeRejectReason}
+            onChange={e => setCbeRejectReason(e.target.value)}
+            rows={3}
+            placeholder="Reason for rejection (e.g. date is too far out, need earlier resolution)…"
+            className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-400 resize-none"
+          />
+          <div className="flex gap-2 pt-2">
+            <Button variant="secondary" onClick={() => setCbeRejectModal(false)}>Cancel</Button>
+            <Button variant="danger" onClick={rejectCbe} disabled={cbeRejecting}>
+              {cbeRejecting ? 'Rejecting…' : 'Confirm Rejection'}
+            </Button>
           </div>
         </div>
       </Modal>

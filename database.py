@@ -58,6 +58,25 @@ def init_db():
             level1 TEXT, level2 TEXT, level3 TEXT
         );
         """)
+        # ── migrations for CBE approval workflow ──
+        for col, defn in [
+            ("assigned_by", "TEXT"),
+            ("cbe_status", "TEXT"),
+            ("cbe_submitted_by", "TEXT"),
+            ("cbe_approved_by", "TEXT"),
+            ("cbe_approved_at", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE complaints ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # column already exists
+        for col, defn in [
+            ("complaint_id", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE emails ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
         c.commit()
     log.info(f"Database ready at {DB_PATH}")
 
@@ -127,6 +146,7 @@ def _row_to_complaint(row):
         issueDetails=row["issue_details"] or "", notes=row["notes"] or "",
         status=row["status"] or "Pending Validation",
         department=row["department"], assignedTo=row["assigned_to"],
+        assignedBy=row["assigned_by"] if "assigned_by" in row.keys() else None,
         watchers=_json_loads(row["watchers"], []),
         mailThread=row["mail_thread"],
         customerName=row["customer_name"] or "",
@@ -137,6 +157,10 @@ def _row_to_complaint(row):
         closureDue=row["closure_due"],
         actions=_json_loads(row["actions"], []),
         cbeDate=row["cbe_date"],
+        cbeStatus=row["cbe_status"] if "cbe_status" in row.keys() else None,
+        cbeSubmittedBy=row["cbe_submitted_by"] if "cbe_submitted_by" in row.keys() else None,
+        cbeApprovedBy=row["cbe_approved_by"] if "cbe_approved_by" in row.keys() else None,
+        cbeApprovedAt=row["cbe_approved_at"] if "cbe_approved_at" in row.keys() else None,
         rca=_json_loads(row["rca"]) if row["rca"] else None,
         capa=_json_loads(row["capa"]) if row["capa"] else None,
         closureStatus=row["closure_status"],
@@ -158,22 +182,26 @@ def create_complaint(data):
 
     with get_connection() as c:
         c.execute("""INSERT INTO complaints (id,project,type,severity,source,raised_on,zone,
-            issue_details,notes,status,department,assigned_to,watchers,mail_thread,
+            issue_details,notes,status,department,assigned_to,assigned_by,watchers,mail_thread,
             customer_name,customer_email,ai_extracted,validated_by,validated_at,
-            sla_started,rca_due,closure_due,actions,cbe_date,rca,capa,
+            sla_started,rca_due,closure_due,actions,cbe_date,cbe_status,cbe_submitted_by,
+            cbe_approved_by,cbe_approved_at,rca,capa,
             closure_status,customer_confirmation,closure_method)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (cid, data.get("project",""), data.get("type",""), severity,
              data.get("source","Email"), data.get("raisedOn") or now,
              data.get("zone",""), data.get("issueDetails",""), data.get("notes",""),
-             data.get("status","Pending Validation"), data.get("department"),
-             data.get("assignedTo"), json.dumps(data.get("watchers",[])),
-             data.get("mailThread"), data.get("customerName",""),
-             data.get("customerEmail",""), json.dumps(data.get("aiExtracted",{})),
-             data.get("validatedBy"), data.get("validatedAt"),
-             sla_started, rca_due, closure_due,
-             json.dumps(data.get("actions",[])), data.get("cbeDate"),
-             json.dumps(data.get("rca")) if data.get("rca") else None,
+              data.get("status","Pending Validation"), data.get("department"),
+              data.get("assignedTo"), data.get("assignedBy"),
+              json.dumps(data.get("watchers",[])),
+              data.get("mailThread"), data.get("customerName",""),
+              data.get("customerEmail",""), json.dumps(data.get("aiExtracted",{})),
+              data.get("validatedBy"), data.get("validatedAt"),
+              sla_started, rca_due, closure_due,
+              json.dumps(data.get("actions",[])), data.get("cbeDate"),
+              data.get("cbeStatus"), data.get("cbeSubmittedBy"),
+              data.get("cbeApprovedBy"), data.get("cbeApprovedAt"),
+              json.dumps(data.get("rca")) if data.get("rca") else None,
              json.dumps(data.get("capa")) if data.get("capa") else None,
              data.get("closureStatus"), 
              json.dumps(data.get("customerConfirmation")) if data.get("customerConfirmation") else None,
@@ -208,11 +236,15 @@ def update_complaint(cid, updates):
         "project":"project","type":"type","severity":"severity","source":"source",
         "raisedOn":"raised_on","zone":"zone","issueDetails":"issue_details",
         "notes":"notes","status":"status","department":"department",
-        "assignedTo":"assigned_to","mailThread":"mail_thread",
+        "assignedTo":"assigned_to","assignedBy":"assigned_by",
+        "mailThread":"mail_thread",
         "customerName":"customer_name","customerEmail":"customer_email",
         "validatedBy":"validated_by","validatedAt":"validated_at",
         "slaStarted":"sla_started","rcaDue":"rca_due","closureDue":"closure_due",
-        "cbeDate":"cbe_date","closureStatus":"closure_status",
+        "cbeDate":"cbe_date","cbeStatus":"cbe_status",
+        "cbeSubmittedBy":"cbe_submitted_by","cbeApprovedBy":"cbe_approved_by",
+        "cbeApprovedAt":"cbe_approved_at",
+        "closureStatus":"closure_status",
         "closureMethod":"closure_method",
     }
     json_fields = {"watchers","aiExtracted","actions","rca","capa","customerConfirmation"}
@@ -235,11 +267,14 @@ def delete_complaint(cid):
         c.execute("DELETE FROM complaints WHERE id=?", (cid,)); c.commit()
 
 # ── Email helpers ──
-def save_email(from_email, from_name, subject, body, ai_data=None, source="Email"):
+def save_email(from_email, from_name, subject, body, ai_data=None, source="Email", received_at=None):
     eid = str(uuid.uuid4())
+    if not received_at:
+        import datetime
+        received_at = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     with get_connection() as c:
-        c.execute("INSERT INTO emails (id,from_email,from_name,subject,body,ai_data,source) VALUES (?,?,?,?,?,?,?)",
-            (eid, from_email, from_name or "", subject, body, json.dumps(ai_data or {}), source))
+        c.execute("INSERT INTO emails (id,from_email,from_name,subject,body,ai_data,source,received_at) VALUES (?,?,?,?,?,?,?,?)",
+            (eid, from_email, from_name or "", subject, body, json.dumps(ai_data or {}), source, received_at))
         c.commit()
     return eid
 
@@ -250,6 +285,8 @@ def get_pending_emails():
     for row in rows:
         d = dict(row)
         d["ai_data"] = _json_loads(d.get("ai_data"))
+        if d.get("received_at") and "Z" not in d["received_at"] and "+" not in d["received_at"]:
+            d["received_at"] = d["received_at"].replace(" ", "T") + "Z"
         result.append(d)
     return result
 
@@ -260,6 +297,8 @@ def get_all_emails():
     for row in rows:
         d = dict(row)
         d["ai_data"] = _json_loads(d.get("ai_data"))
+        if d.get("received_at") and "Z" not in d["received_at"] and "+" not in d["received_at"]:
+            d["received_at"] = d["received_at"].replace(" ", "T") + "Z"
         result.append(d)
     return result
 
@@ -269,6 +308,8 @@ def get_email_by_id(eid):
     if not row: return None
     d = dict(row)
     d["ai_data"] = _json_loads(d.get("ai_data"))
+    if d.get("received_at") and "Z" not in d["received_at"] and "+" not in d["received_at"]:
+        d["received_at"] = d["received_at"].replace(" ", "T") + "Z"
     return d
 
 def update_email_ai_data(eid, ai_data):
@@ -276,9 +317,12 @@ def update_email_ai_data(eid, ai_data):
         c.execute("UPDATE emails SET ai_data=?, status='extracted' WHERE id=?", (json.dumps(ai_data), eid))
         c.commit()
 
-def update_email_status(eid, status):
+def update_email_status(eid, status, complaint_id=None):
     with get_connection() as c:
-        c.execute("UPDATE emails SET status=?, processed_at=CURRENT_TIMESTAMP WHERE id=?", (status, eid))
+        if complaint_id is None:
+            c.execute("UPDATE emails SET status=?, processed_at=CURRENT_TIMESTAMP WHERE id=?", (status, eid))
+        else:
+            c.execute("UPDATE emails SET status=?, complaint_id=?, processed_at=CURRENT_TIMESTAMP WHERE id=?", (status, complaint_id, eid))
         c.commit()
 
 def mark_email_processed(eid):

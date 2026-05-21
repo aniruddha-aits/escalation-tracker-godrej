@@ -79,7 +79,7 @@ export default function SLATracker() {
   };
 
   return (
-    <Layout title="SLA Tracker" subtitle="Real-time SLA monitoring and breach alerts">
+    <Layout title="SLA Tracker" subtitle="Service Level Agreement monitoring and breach alerts">
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
         <StatCard title="SLA Breached" value={breached.length} icon={AlertTriangle} color="red" subtitle="Immediate action required" />

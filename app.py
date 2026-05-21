@@ -58,16 +58,21 @@ def _extract_sender(from_header):
         return match.group(1).strip().strip('"'), match.group(2).strip()
     return "", from_header.strip()
 
-def handle_new_email(subject, body, from_header=""):
+def handle_new_email(subject, body, from_header="", received_at=None):
     log.info(f"Processing email: {subject[:80]}")
     from_name, from_email = _extract_sender(from_header)
     result = ai_processor.analyze_email(subject, body, from_name=from_name, from_email=from_email)
-    database.save_email(from_email=from_email, from_name=from_name, subject=subject, body=body, ai_data=result)
+    database.save_email(from_email=from_email, from_name=from_name, subject=subject, body=body, ai_data=result, received_at=received_at)
 
 def _complaint_payload_for_user(complaint, user):
     data = complaint.to_dict()
-    if complaint.assignedTo != user.id:
+    # Show CBE Date to the assignee AND the person who assigned (approver)
+    if complaint.assignedTo != user.id and complaint.assignedBy != user.id:
         data["cbeDate"] = None
+        data["cbeStatus"] = None
+        data["cbeSubmittedBy"] = None
+        data["cbeApprovedBy"] = None
+        data["cbeApprovedAt"] = None
     return data
 
 def _email_payload_with_customer(email_data):
@@ -158,6 +163,17 @@ def api_update_complaint(cid):
             return jsonify({"success": False, "message": "Not found"}), 404
         if c.assignedTo != g.current_user.id:
             return jsonify({"success": False, "message": "Only the assigned user can update CBE Date"}), 403
+        # CBE Date goes into pending approval state
+        data["cbeStatus"] = "pending"
+        data["cbeSubmittedBy"] = g.current_user.id
+        data["cbeApprovedBy"] = None
+        data["cbeApprovedAt"] = None
+        # Notify the assigner so they can approve
+        if c.assignedBy:
+            database.create_notification("CBE_PENDING", cid, c.assignedBy,
+                "CBE Date Pending Approval",
+                f"CBE Date for {cid} submitted by {g.current_user.name}. Please review and approve.",
+                c.severity or "Medium")
     database.update_complaint(cid, data)
     return jsonify({"success": True, "message": "Updated"})
 
@@ -186,10 +202,67 @@ def api_assign_complaint(cid):
     updates = {"status": "Assigned"}
     if data.get("department"): updates["department"] = data["department"]
     if data.get("assignedTo"): updates["assignedTo"] = data["assignedTo"]
+    # Track who did the assignment — this user will approve the CBE Date
+    updates["assignedBy"] = g.current_user.id
     database.update_complaint(cid, updates)
     database.create_notification("ASSIGNMENT", cid, data.get("assignedTo",""),
         "New Complaint Assigned", f"{cid} has been assigned.", data.get("severity","Medium"))
     return jsonify({"success": True, "message": "Assigned"})
+
+# ── CBE Date Approval ─────────────────────────────────────────────────────────
+
+@app.route("/api/complaints/<cid>/cbe/approve", methods=["POST"])
+@token_required
+def api_approve_cbe(cid):
+    c = database.get_complaint_by_id(cid)
+    if not c:
+        return jsonify({"success": False, "message": "Not found"}), 404
+    if not c.cbeDate or c.cbeStatus != "pending":
+        return jsonify({"success": False, "message": "No pending CBE Date to approve"}), 400
+    # Only the assigner or Admin can approve
+    if c.assignedBy != g.current_user.id and g.current_user.role != "Admin":
+        return jsonify({"success": False, "message": "Only the person who assigned this complaint can approve the CBE Date"}), 403
+    now = datetime.now().isoformat()
+    database.update_complaint(cid, {
+        "cbeStatus": "approved",
+        "cbeApprovedBy": g.current_user.id,
+        "cbeApprovedAt": now,
+    })
+    # Notify the assignee
+    if c.assignedTo:
+        database.create_notification("CBE_APPROVED", cid, c.assignedTo,
+            "CBE Date Approved",
+            f"CBE Date for {cid} has been approved by {g.current_user.name}.",
+            c.severity or "Medium")
+    return jsonify({"success": True, "message": "CBE Date approved"})
+
+@app.route("/api/complaints/<cid>/cbe/reject", methods=["POST"])
+@token_required
+def api_reject_cbe(cid):
+    c = database.get_complaint_by_id(cid)
+    if not c:
+        return jsonify({"success": False, "message": "Not found"}), 404
+    if not c.cbeDate or c.cbeStatus != "pending":
+        return jsonify({"success": False, "message": "No pending CBE Date to reject"}), 400
+    # Only the assigner or Admin can reject
+    if c.assignedBy != g.current_user.id and g.current_user.role != "Admin":
+        return jsonify({"success": False, "message": "Only the person who assigned this complaint can reject the CBE Date"}), 403
+    data = request.json or {}
+    now = datetime.now().isoformat()
+    database.update_complaint(cid, {
+        "cbeDate": None,
+        "cbeStatus": "rejected",
+        "cbeApprovedBy": g.current_user.id,
+        "cbeApprovedAt": now,
+    })
+    # Notify the assignee with rejection reason
+    reason = data.get("reason", "No reason provided.")
+    if c.assignedTo:
+        database.create_notification("CBE_REJECTED", cid, c.assignedTo,
+            "CBE Date Rejected",
+            f"CBE Date for {cid} was rejected by {g.current_user.name}. Reason: {reason}",
+            c.severity or "Medium")
+    return jsonify({"success": True, "message": "CBE Date rejected"})
 
 @app.route("/api/complaints/<cid>/validate", methods=["POST"])
 @token_required
@@ -318,12 +391,17 @@ def api_sync_emails():
             body = _extract_body(msg)
             from_header = _decode_header(msg.get("From", ""))
             from_name, from_email = _extract_sender(from_header)
+            
+            # Parse received date
+            from email_watcher import parse_email_date
+            received_at = parse_email_date(msg.get("Date"))
+
             with database.get_connection() as conn:
                 exists = conn.execute("SELECT COUNT(*) FROM emails WHERE subject=? AND from_email=?", (subject, from_email)).fetchone()[0]
             if exists > 0:
                 continue
             result = ai_processor.analyze_email(subject, body, from_name=from_name, from_email=from_email)
-            database.save_email(from_email=from_email, from_name=from_name, subject=subject, body=body, ai_data=result)
+            database.save_email(from_email=from_email, from_name=from_name, subject=subject, body=body, ai_data=result, received_at=received_at)
             fetched += 1
         mail.logout()
         return jsonify({"success": True, "message": f"Fetched {fetched} new email(s)", "fetched": fetched})
@@ -372,7 +450,7 @@ def api_send_to_queue(eid):
                         "suggestedSeverity": ai.get("priority","Medium"),
                         "suggestedDepartment": ai.get("department","Other")},
     })
-    database.update_email_status(eid, "queued")
+    database.update_email_status(eid, "queued", cid)
     return jsonify({"success": True, "message": "Sent to queue", "complaintId": cid})
 
 @app.route("/api/emails/<eid>/reject", methods=["POST"])

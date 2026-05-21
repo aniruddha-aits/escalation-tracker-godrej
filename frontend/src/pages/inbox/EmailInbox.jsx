@@ -1,17 +1,15 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Mail, RefreshCw, Sparkles, CheckCircle2, Clock, Send,
-  Wifi, AlertCircle, ChevronRight, User, Tag, Building2,
-  MapPin, Zap, Eye, ExternalLink, Shield, Inbox,
+  Mail, RefreshCw, Sparkles, CheckCircle2, User, Tag, Building2,
+  MapPin, Zap, ExternalLink, Inbox, XCircle,
 } from 'lucide-react';
 import { Layout } from '../../components/layout/Layout';
-import { SeverityBadge, Badge } from '../../components/ui/Badge';
+import { Badge } from '../../components/ui/Badge';
 import { Button } from '../../components/ui/Button';
-import { Card, CardHeader } from '../../components/ui/Card';
 import { Modal } from '../../components/ui/Modal';
 import { useApp } from '../../context/AppContext';
-import { emailsAPI, configAPI } from '../../services/api';
+import { emailsAPI, configAPI, adminAPI, complaintsAPI } from '../../services/api';
 import { SEVERITY_CONFIG } from '../../data/mockData';
 import { formatDistanceToNow, format } from 'date-fns';
 
@@ -20,7 +18,8 @@ const AI_STATUS = {
   pending:   { label: 'Unprocessed',   color: 'bg-slate-100 text-slate-500',   dot: 'bg-slate-400' },
   processing:{ label: 'AI Processing', color: 'bg-purple-100 text-purple-700', dot: 'bg-purple-500 animate-pulse' },
   extracted: { label: 'AI Extracted',  color: 'bg-blue-100 text-blue-700',     dot: 'bg-blue-500' },
-  queued:    { label: 'Sent to Queue', color: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+  queued:    { label: 'Approved', color: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+  rejected:  { label: 'Rejected', color: 'bg-red-100 text-red-700', dot: 'bg-red-500' },
 };
 
 /* ─── Confidence indicator ──────────────────────────────────── */
@@ -43,7 +42,7 @@ function ConfidenceBar({ value }) {
 
 /* ─── Email list item ───────────────────────────────────────── */
 function EmailItem({ email, selected, onClick }) {
-  const cfg = AI_STATUS[email.aiStatus];
+  const cfg = AI_STATUS[email.aiStatus] || AI_STATUS.pending;
   return (
     <button
       onClick={onClick}
@@ -74,44 +73,181 @@ function EmailItem({ email, selected, onClick }) {
 }
 
 /* ─── Raw email panel ───────────────────────────────────────── */
-function RawEmailView({ email }) {
+function formatEmailDate(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : format(parsed, 'EEE, dd MMM yyyy HH:mm');
+}
+
+function parseHeaderLine(line) {
+  const match = line.match(/^\s*(from|to|cc|date|sent|subject)\s*:?\s*(.*)$/i);
+  if (!match) return null;
+  const key = match[1].toLowerCase() === 'sent' ? 'date' : match[1].toLowerCase();
+  return { key, value: match[2].trim() };
+}
+
+function isSeparatorLine(line) {
+  return /^\s*(?:[-_=*]\s*){4,}\s*$/.test(line) || /^\s*-+\s*(original message|forwarded message)\s*-+\s*$/i.test(line);
+}
+
+function findNextHeaderLine(lines, start, end) {
+  for (let i = start; i < Math.min(lines.length, end); i += 1) {
+    const line = lines[i];
+    if (!line.trim() || isSeparatorLine(line)) continue;
+    const parsed = parseHeaderLine(line);
+    return parsed?.key || null;
+  }
+  return null;
+}
+
+function looksLikeTrailHeader(lines, start) {
+  const seen = new Set();
+  let lastKey = null;
+  const end = Math.min(lines.length, start + 16);
+  for (let i = start; i < end; i += 1) {
+    const line = lines[i];
+    if (!line.trim() || isSeparatorLine(line)) continue;
+    const parsed = parseHeaderLine(line);
+    if (!parsed) {
+      if (lastKey && (/^\s+/.test(line) || findNextHeaderLine(lines, i + 1, end))) continue;
+      break;
+    }
+    seen.add(parsed.key);
+    lastKey = parsed.key;
+  }
+  return seen.has('from') && seen.has('to') && seen.has('subject');
+}
+
+function readTrailHeader(lines, start) {
+  const headers = {};
+  let index = start;
+  let lastKey = null;
+  for (; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || isSeparatorLine(line)) continue;
+    const parsed = parseHeaderLine(line);
+    if (!parsed) {
+      const nextHeader = findNextHeaderLine(lines, index + 1, Math.min(lines.length, start + 16));
+      const isWrappedHeaderValue = lastKey && (/^\s+/.test(line) || nextHeader);
+      if (isWrappedHeaderValue) {
+        headers[lastKey] = `${headers[lastKey] || ''} ${line.trim()}`.trim();
+        continue;
+      }
+      break;
+    }
+    headers[parsed.key] = parsed.value;
+    lastKey = parsed.key;
+  }
+  while (index < lines.length && (!lines[index].trim() || isSeparatorLine(lines[index]))) {
+    index += 1;
+  }
+  return { headers, bodyStart: index };
+}
+
+function cleanMailBody(lines) {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && (!lines[start].trim() || isSeparatorLine(lines[start]))) start += 1;
+  while (end > start && (!lines[end - 1].trim() || isSeparatorLine(lines[end - 1]))) end -= 1;
+  return lines.slice(start, end).join('\n').trim();
+}
+
+function getMailTrailSections(email) {
+  const lines = (email.body || '').replace(/\r\n/g, '\n').split('\n');
+  const starts = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const parsed = parseHeaderLine(lines[i]);
+    if (parsed?.key === 'from' && looksLikeTrailHeader(lines, i)) {
+      starts.push(i);
+    }
+  }
+
+  let trailStarts = starts;
+  let currentHeaders = {
+    from: `${email.fromName} <${email.from}>`,
+    to: email.to,
+    cc: (email.cc || []).join(', '),
+    date: formatEmailDate(email.receivedAt),
+    subject: email.subject,
+  };
+  let currentBodyLines = starts.length ? lines.slice(0, starts[0]) : lines;
+
+  if (starts.length && cleanMailBody(lines.slice(0, starts[0])) === '') {
+    const first = readTrailHeader(lines, starts[0]);
+    const nextStart = starts[1] ?? lines.length;
+    currentHeaders = {
+      ...currentHeaders,
+      ...Object.fromEntries(Object.entries(first.headers).filter(([, value]) => value)),
+    };
+    currentBodyLines = lines.slice(first.bodyStart, nextStart);
+    trailStarts = starts.slice(1);
+  }
+
+  const sections = [{
+    id: 'current',
+    current: true,
+    headers: currentHeaders,
+    body: cleanMailBody(currentBodyLines),
+  }];
+
+  trailStarts.forEach((start, idx) => {
+    const { headers, bodyStart } = readTrailHeader(lines, start);
+    const nextStart = trailStarts[idx + 1] ?? lines.length;
+    sections.push({
+      id: `trail-${idx}`,
+      current: false,
+      headers,
+      body: cleanMailBody(lines.slice(bodyStart, nextStart)),
+    });
+  });
+
+  return sections;
+}
+
+function MailTrailSection({ section }) {
+  const rows = [
+    ['From', section.headers.from],
+    ['To', section.headers.to],
+    ['CC', section.headers.cc],
+    ['Date', section.headers.date],
+    ['Subject', section.headers.subject],
+  ].filter(([, value]) => value);
+
   return (
-    <div className="text-xs">
-      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4 space-y-2 font-mono">
-        <div className="flex gap-3">
-          <span className="text-slate-400 w-8 flex-shrink-0">From</span>
-          <span className="text-slate-700">{email.fromName} &lt;{email.from}&gt;</span>
-        </div>
-        <div className="flex gap-3">
-          <span className="text-slate-400 w-8 flex-shrink-0">To</span>
-          <span className="text-slate-700">{email.to}</span>
-        </div>
-        {email.cc.length > 0 && (
-          <div className="flex gap-3">
-            <span className="text-slate-400 w-8 flex-shrink-0">CC</span>
-            <span className="text-slate-700">{email.cc.join(', ')}</span>
-          </div>
-        )}
-        <div className="flex gap-3">
-          <span className="text-slate-400 w-8 flex-shrink-0">Date</span>
-          <span className="text-slate-700">{format(new Date(email.receivedAt), 'EEE, dd MMM yyyy HH:mm')}</span>
-        </div>
-        <div className="flex gap-3">
-          <span className="text-slate-400 w-8 flex-shrink-0">Subj</span>
-          <span className="text-slate-800 font-semibold">{email.subject}</span>
+    <div className={`overflow-hidden rounded-xl border ${section.current ? 'border-blue-200' : 'border-slate-200'}`}>
+      <div className={`${section.current ? 'bg-blue-50' : 'bg-slate-50'} px-4 py-3 border-b ${section.current ? 'border-blue-100' : 'border-slate-200'}`}>
+        <div className="space-y-1.5 font-mono">
+          {rows.map(([label, value]) => (
+            <div key={label} className="grid grid-cols-[4.5rem_1fr] gap-3">
+              <span className={`text-[10px] uppercase tracking-wide ${section.current ? 'text-blue-500' : 'text-slate-400'}`}>{label}</span>
+              <span className={`text-xs ${label === 'Subject' ? 'font-semibold text-slate-900' : 'text-slate-700'}`}>{value}</span>
+            </div>
+          ))}
         </div>
       </div>
-      <div className="bg-white border border-slate-200 rounded-xl p-4 leading-relaxed text-slate-700 whitespace-pre-wrap font-sans">
-        {email.body}
+      <div className="bg-white px-4 py-4 leading-relaxed text-slate-700 whitespace-pre-wrap font-sans">
+        {section.body || <span className="text-slate-400">-</span>}
       </div>
     </div>
   );
 }
 
+function RawEmailView({ email }) {
+  const sections = getMailTrailSections(email);
+  return (
+    <div className="text-xs space-y-4">
+      {sections.map(section => <MailTrailSection key={section.id} section={section} />)}
+    </div>
+  );
+}
+
 /* ─── AI extraction panel ───────────────────────────────────── */
-function AIExtractionView({ email, onSendToQueue, editState, setEditState, departments }) {
+function AIExtractionView({ email, onApprove, onReject, onAssignRoute, editState, setEditState, departments, decisionAction }) {
   const ai = email.aiExtracted;
   if (!ai) return null;
+  const isApproved = email.aiStatus === 'queued';
+  const isRejected = email.aiStatus === 'rejected';
+  const decisionPending = decisionAction?.id === email.id;
 
   return (
     <div className="space-y-4">
@@ -214,16 +350,64 @@ function AIExtractionView({ email, onSendToQueue, editState, setEditState, depar
         </div>
       )}
 
-      {email.aiStatus !== 'queued' && (
-        <Button variant="primary" className="w-full justify-center" onClick={onSendToQueue}>
-          <Send className="w-4 h-4" /> Send to Validation Queue
-        </Button>
+      {!isApproved && !isRejected && (
+        <div className="space-y-2">
+          <Button
+            variant="secondary"
+            className="w-full justify-center"
+            onClick={onAssignRoute}
+            disabled={decisionPending}
+          >
+            <User className="w-4 h-4" />
+            Assign & Route Complaint
+          </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              variant="danger"
+              className="justify-center"
+              onClick={onReject}
+              disabled={decisionPending}
+            >
+              <XCircle className="w-4 h-4" />
+              {decisionAction?.type === 'reject' && decisionAction?.id === email.id ? 'Rejecting...' : 'Reject'}
+            </Button>
+            <Button
+              variant="success"
+              className="justify-center"
+              onClick={onApprove}
+              disabled={decisionPending}
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              {decisionAction?.type === 'approve' && decisionAction?.id === email.id ? 'Approving...' : 'Approve'}
+            </Button>
+          </div>
+        </div>
       )}
 
-      {email.aiStatus === 'queued' && (
-        <div className="flex items-center gap-2 justify-center p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 font-semibold">
-          <CheckCircle2 className="w-4 h-4" />
-          Sent to Validation Queue as {email.queuedAsComplaintId}
+      {isApproved && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 justify-center p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 font-semibold">
+            <CheckCircle2 className="w-4 h-4" />
+            Approved{email.queuedAsComplaintId ? ` as ${email.queuedAsComplaintId}` : ''}
+          </div>
+          {email.queuedAsComplaintId && (
+            <Button
+              variant="secondary"
+              className="w-full justify-center"
+              onClick={onAssignRoute}
+              disabled={decisionPending}
+            >
+              <User className="w-4 h-4" />
+              Assign & Route Complaint
+            </Button>
+          )}
+        </div>
+      )}
+
+      {isRejected && (
+        <div className="flex items-center gap-2 justify-center p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold">
+          <XCircle className="w-4 h-4" />
+          Rejected
         </div>
       )}
     </div>
@@ -236,14 +420,29 @@ function SyncingOverlay() {
     <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex flex-col items-center justify-center z-20 rounded-xl">
       <div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-3" />
       <p className="text-sm font-semibold text-slate-700">Connecting to inbox…</p>
-      <p className="text-xs text-slate-400 mt-1">Fetching new emails from complaints@godrejproperties.com</p>
+      <p className="text-xs text-slate-400 mt-1" style={{textAlign: "center"}}>Fetching new emails from complaints@godrejproperties.com</p>
     </div>
   );
 }
 
 /* ─── Main Page ─────────────────────────────────────────────── */
+function getEditState(email) {
+  const ai = email?.aiExtracted || {};
+  return {
+    customerName:        ai.customerName ?? '',
+    customerEmail:       ai.customerEmail ?? '',
+    suggestedSeverity:   ai.suggestedSeverity ?? ai.priority ?? 'Medium',
+    suggestedDepartment: ai.suggestedDepartment ?? ai.department ?? '',
+    suggestedZone:       ai.suggestedZone ?? ai.zone ?? '',
+    suggestedType:       ai.suggestedType ?? ai.type ?? '',
+    project:             ai.project ?? '',
+    issueDetails:        ai.issueDetails ?? '',
+    assignedTo:          email?.assignedTo ?? '',
+  };
+}
+
 export default function EmailInbox() {
-  const { addComplaint, fetchComplaints } = useApp();
+  const { fetchComplaints } = useApp();
   const navigate = useNavigate();
 
   const [emails, setEmails]         = useState([]);
@@ -252,16 +451,25 @@ export default function EmailInbox() {
   const [filterTab, setFilterTab]   = useState('all');
   const [syncing, setSyncing]       = useState(false);
   const [processingId, setProcessingId] = useState(null);
+  const [decisionAction, setDecisionAction] = useState(null);
   const [lastSynced, setLastSynced] = useState(new Date());
   const [editState, setEditState]   = useState({});
-  const [search, setSearch]         = useState('');
   const [departments, setDepartments] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [assignModal, setAssignModal] = useState(false);
+  const [selectedDept, setSelectedDept] = useState('');
+  const [selectedUser, setSelectedUser] = useState('');
 
   // Fetch emails from backend on mount
   useEffect(() => {
     configAPI.enums().then(r => {
       if (r.success) {
         setDepartments(r.data.departments || []);
+      }
+    }).catch(() => {});
+    adminAPI.getUsers().then(r => {
+      if (r.success) {
+        setUsers(r.data || []);
       }
     }).catch(() => {});
     emailsAPI.getAll().then(res => {
@@ -272,30 +480,17 @@ export default function EmailInbox() {
           subject: e.subject, body: e.body || '', receivedAt: e.received_at,
           source: e.source || 'Email', aiStatus: e.status || 'pending',
           aiExtracted: e.ai_data && Object.keys(e.ai_data).length > 0 ? e.ai_data : null,
-          queuedAsComplaintId: null,
+          queuedAsComplaintId: e.complaint_id || null,
         }));
         setEmails(mapped);
       }
     }).catch(() => {});
   }, []);
 
-  // When selected email changes reset editState
-  useEffect(() => {
-    setEditState({
-      customerName:       selected?.aiExtracted?.customerName ?? '',
-      customerEmail:      selected?.aiExtracted?.customerEmail ?? '',
-      suggestedSeverity:  selected?.aiExtracted?.suggestedSeverity ?? selected?.aiExtracted?.priority ?? 'Medium',
-      suggestedDepartment: selected?.aiExtracted?.suggestedDepartment ?? selected?.aiExtracted?.department ?? '',
-      suggestedZone:      selected?.aiExtracted?.suggestedZone ?? selected?.aiExtracted?.zone ?? '',
-      suggestedType:      selected?.aiExtracted?.suggestedType ?? selected?.aiExtracted?.type ?? '',
-      project:            selected?.aiExtracted?.project ?? '',
-      issueDetails:       selected?.aiExtracted?.issueDetails ?? '',
-    });
-  }, [selected?.id, selected?.aiExtracted]);
-
   const handleSelect = (email) => {
     setSelected(email);
-    setActiveTab(email.aiStatus === 'pending' ? 'raw' : 'ai');
+    setEditState(getEditState(email));
+    setActiveTab(email.aiStatus === 'pending' || !email.aiExtracted ? 'raw' : 'ai');
   };
 
   /* Sync Now — calls backend to fetch new emails from IMAP */
@@ -311,7 +506,7 @@ export default function EmailInbox() {
           subject: e.subject, body: e.body || '', receivedAt: e.received_at,
           source: e.source || 'Email', aiStatus: e.status || 'pending',
           aiExtracted: e.ai_data && Object.keys(e.ai_data).length > 0 ? e.ai_data : null,
-          queuedAsComplaintId: null,
+          queuedAsComplaintId: e.complaint_id || null,
         }));
         setEmails(mapped);
       }
@@ -354,6 +549,7 @@ export default function EmailInbox() {
             suggestedType: extracted.suggestedType,
             project: extracted.project,
             issueDetails: extracted.issueDetails,
+            assignedTo: '',
           });
         }
       }
@@ -361,40 +557,100 @@ export default function EmailInbox() {
     setProcessingId(null);
   };
 
-  /* Send to Validation Queue — calls backend API */
-  const handleSendToQueue = async () => {
+  const getRouteDefaults = () => {
+    const ai = selected?.aiExtracted || {};
+    return {
+      department: editState.suggestedDepartment || ai.suggestedDepartment || ai.department || '',
+      severity: editState.suggestedSeverity || ai.suggestedSeverity || ai.priority || 'Medium',
+    };
+  };
+
+  const promoteEmailToComplaint = async (route = {}) => {
     if (!selected || !selected.aiExtracted) return;
     const ai = selected.aiExtracted;
+    const res = await emailsAPI.sendToQueue(selected.id, {
+      project: editState.project || ai.project,
+      type: editState.suggestedType || ai.suggestedType,
+      severity: route.severity || editState.suggestedSeverity || ai.suggestedSeverity,
+      zone: editState.suggestedZone || ai.suggestedZone,
+      department: route.department || editState.suggestedDepartment || ai.suggestedDepartment,
+      issueDetails: editState.issueDetails || ai.issueDetails,
+      customerName: editState.customerName || ai.customerName,
+    });
+    if (!res.success) return null;
+    const compId = res.complaintId;
+    setEmails(prev => prev.map(e => e.id === selected.id ? { ...e, aiStatus: 'queued', queuedAsComplaintId: compId } : e));
+    setSelected(prev => prev ? { ...prev, aiStatus: 'queued', queuedAsComplaintId: compId } : prev);
+    return compId;
+  };
+
+  const handleApproveEmail = async () => {
+    if (!selected || !selected.aiExtracted) return;
+    setDecisionAction({ id: selected.id, type: 'approve' });
     try {
-      const res = await emailsAPI.sendToQueue(selected.id, {
-        project: editState.project || ai.project,
-        type: editState.suggestedType || ai.suggestedType,
-        severity: editState.suggestedSeverity || ai.suggestedSeverity,
-        zone: editState.suggestedZone || ai.suggestedZone,
-        department: editState.suggestedDepartment || ai.suggestedDepartment,
-        issueDetails: editState.issueDetails || ai.issueDetails,
-        customerName: editState.customerName || ai.customerName,
-      });
-      if (res.success) {
-        const compId = res.complaintId;
-        setEmails(prev => prev.map(e => e.id === selected.id ? { ...e, aiStatus: 'queued', queuedAsComplaintId: compId } : e));
-        setSelected(prev => ({ ...prev, aiStatus: 'queued', queuedAsComplaintId: compId }));
-        await fetchComplaints();
+      await promoteEmailToComplaint();
+      await fetchComplaints();
+    } catch (err) { console.error('Approve email error:', err); }
+    finally { setDecisionAction(null); }
+  };
+
+  const openAssignRouteModal = () => {
+    const defaults = getRouteDefaults();
+    setSelectedDept(defaults.department);
+    setSelectedUser(editState.assignedTo || '');
+    setAssignModal(true);
+  };
+
+  const handleAssignRoute = async () => {
+    if (!selected || !selected.aiExtracted || !selectedUser) return;
+    const defaults = getRouteDefaults();
+    const department = selectedDept || defaults.department;
+    const severity = defaults.severity;
+    setDecisionAction({ id: selected.id, type: 'assign' });
+    try {
+      let complaintId = selected.queuedAsComplaintId;
+      if (selected.aiStatus !== 'queued' || !complaintId) {
+        complaintId = await promoteEmailToComplaint({ department, severity });
       }
-    } catch (err) { console.error('Send to queue error:', err); }
+      if (!complaintId) return;
+      await complaintsAPI.assign(complaintId, { department, assignedTo: selectedUser, severity });
+      setEmails(prev => prev.map(e => e.id === selected.id ? { ...e, aiStatus: 'queued', queuedAsComplaintId: complaintId, assignedTo: selectedUser } : e));
+      setSelected(prev => prev ? { ...prev, aiStatus: 'queued', queuedAsComplaintId: complaintId, assignedTo: selectedUser } : prev);
+      setEditState(prev => ({ ...prev, assignedTo: selectedUser, suggestedDepartment: department }));
+      await fetchComplaints();
+      setAssignModal(false);
+    } catch (err) { console.error('Assign route error:', err); }
+    finally { setDecisionAction(null); }
+  };
+
+  const handleRejectEmail = async () => {
+    if (!selected) return;
+    setDecisionAction({ id: selected.id, type: 'reject' });
+    try {
+      const res = await emailsAPI.reject(selected.id);
+      if (res.success) {
+        setEmails(prev => prev.map(e => e.id === selected.id ? { ...e, aiStatus: 'rejected' } : e));
+        setSelected(prev => prev ? { ...prev, aiStatus: 'rejected' } : prev);
+      }
+    } catch (err) { console.error('Reject email error:', err); }
+    finally { setDecisionAction(null); }
   };
 
   const TABS = [
     { key: 'all',       label: 'All',            count: emails.length },
     { key: 'pending',   label: 'Unprocessed',    count: emails.filter(e => e.aiStatus === 'pending').length },
     { key: 'extracted', label: 'AI Processed',   count: emails.filter(e => e.aiStatus === 'extracted').length },
-    { key: 'queued',    label: 'Sent to Queue',  count: emails.filter(e => e.aiStatus === 'queued').length },
+    { key: 'queued',    label: 'Approved',       count: emails.filter(e => e.aiStatus === 'queued').length },
+    { key: 'rejected',  label: 'Rejected',       count: emails.filter(e => e.aiStatus === 'rejected').length },
   ];
 
   const filteredEmails = emails.filter(e => filterTab === 'all' || e.aiStatus === filterTab);
 
   // Keep selected in sync after emails state changes
   const liveSelected = emails.find(e => e.id === selected?.id) ?? selected;
+  const assignableUsers = users.filter(u => (
+    u.is_active !== false && (!selectedDept || u.department === selectedDept)
+  ));
 
   return (
     <Layout title="Email Inbox" subtitle="AI-powered complaint detection from connected mail inbox">
@@ -518,10 +774,10 @@ export default function EmailInbox() {
                     ) : liveSelected.aiStatus === 'extracted' ? 'Re-run AI Analysis' : 'Process with AI'}
                   </Button>
                 )}
-                {liveSelected.aiStatus === 'queued' && (
+                {liveSelected.aiStatus === 'queued' && liveSelected.queuedAsComplaintId && (
                   <Button variant="secondary" size="sm" icon={ExternalLink}
                     onClick={() => navigate(`/complaints/${liveSelected.queuedAsComplaintId}`)}>
-                    View in Queue
+                    View Approved
                   </Button>
                 )}
               </div>
@@ -576,10 +832,13 @@ export default function EmailInbox() {
                   {activeTab === 'ai' && liveSelected.aiExtracted && (
                     <AIExtractionView
                       email={liveSelected}
-                      onSendToQueue={handleSendToQueue}
+                      onApprove={handleApproveEmail}
+                      onReject={handleRejectEmail}
+                      onAssignRoute={openAssignRouteModal}
                       editState={editState}
                       setEditState={setEditState}
                       departments={departments}
+                      decisionAction={decisionAction}
                     />
                   )}
                   {activeTab === 'ai' && !liveSelected.aiExtracted && (
@@ -602,6 +861,48 @@ export default function EmailInbox() {
           </div>
         )}
       </div>
+
+      <Modal open={assignModal} onClose={() => setAssignModal(false)} title="Assign & Route Complaint" size="sm">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1.5">Department</label>
+            <select
+              value={selectedDept}
+              onChange={e => {
+                const dept = e.target.value;
+                setSelectedDept(dept);
+                const assignee = users.find(u => u.id === selectedUser);
+                if (assignee?.department && assignee.department !== dept) {
+                  setSelectedUser('');
+                }
+              }}
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            >
+              <option value="">Select department</option>
+              {departments.map(d => <option key={d}>{d}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1.5">Assign To</label>
+            <select
+              value={selectedUser}
+              onChange={e => setSelectedUser(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            >
+              <option value="">Select user</option>
+              {assignableUsers.map(u => (
+                <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex gap-2 pt-2">
+            <Button variant="secondary" onClick={() => setAssignModal(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleAssignRoute} disabled={!selectedUser || decisionAction?.type === 'assign'}>
+              {decisionAction?.type === 'assign' ? 'Assigning...' : 'Confirm Assignment'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </Layout>
   );
 }

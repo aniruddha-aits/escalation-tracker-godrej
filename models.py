@@ -55,6 +55,7 @@ class Complaint:
     status: str = "Pending Validation"
     department: Optional[str] = None
     assignedTo: Optional[str] = None
+    assignedBy: Optional[str] = None
     watchers: list = field(default_factory=list)
     mailThread: Optional[str] = None
     customerName: str = ""
@@ -67,6 +68,10 @@ class Complaint:
     closureDue: Optional[str] = None
     actions: list = field(default_factory=list)
     cbeDate: Optional[str] = None
+    cbeStatus: Optional[str] = None
+    cbeSubmittedBy: Optional[str] = None
+    cbeApprovedBy: Optional[str] = None
+    cbeApprovedAt: Optional[str] = None
     rca: Optional[dict] = None
     capa: Optional[dict] = None
     closureStatus: Optional[str] = None
@@ -88,6 +93,7 @@ class Complaint:
             "status": self.status,
             "department": self.department,
             "assignedTo": self.assignedTo,
+            "assignedBy": self.assignedBy,
             "watchers": self.watchers,
             "mailThread": self.mailThread,
             "customerName": self.customerName,
@@ -100,6 +106,10 @@ class Complaint:
             "closureDue": self.closureDue,
             "actions": self.actions,
             "cbeDate": self.cbeDate,
+            "cbeStatus": self.cbeStatus,
+            "cbeSubmittedBy": self.cbeSubmittedBy,
+            "cbeApprovedBy": self.cbeApprovedBy,
+            "cbeApprovedAt": self.cbeApprovedAt,
             "rca": self.rca,
             "capa": self.capa,
             "closureStatus": self.closureStatus,
