@@ -46,8 +46,9 @@ export default function NewComplaint() {
   }, []);
 
   const [form, setForm] = useState({
-    project: '', source: '', zone: '', type: '', severity: 'Medium',
+    project: '', source: '', zone: '', severity: '', type: '',
     issueDetails: '', notes: '', department: '', customerName: '', customerEmail: '',
+    flatNumber: '',
     mailThread: '', attachments: [],
   });
 
@@ -140,6 +141,9 @@ export default function NewComplaint() {
               </Field>
               <Field label="Customer Email">
                 <input type="email" value={form.customerEmail} onChange={e => set('customerEmail', e.target.value)} placeholder="john@example.com" className={inputCls} />
+              </Field>
+              <Field label="Flat Number">
+                <input value={form.flatNumber} onChange={e => set('flatNumber', e.target.value)} placeholder="A-101" className={inputCls} />
               </Field>
             </div>
             <Field label="Issue Details" required>

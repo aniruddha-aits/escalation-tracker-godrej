@@ -1,34 +1,62 @@
 """
 ai_processor.py
 ---------------
-Sends an email subject + body to Gemini and
+Sends an email subject + body to OpenRouter (OpenAI-compatible) and
 returns a structured escalation dict parsed from strict JSON.
-Includes retry logic with model fallback for quota exhaustion.
+Includes fallback logic for API failures.
 """
 
 import os
 import re
 import json
-import time
 import logging
-import google.generativeai as genai
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 log = logging.getLogger("ai_processor")
 
-# ── Configure Gemini ──────────────────────────────────────────────────────────
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# ── Configure OpenRouter ──────────────────────────────────────────────────────
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Default to a capable but cheap model if not specified
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-lite-preview-02-05:free")
 
-# Ordered list of models to try — if the primary is quota-exhausted, fall through
-_MODEL_CHAIN = [
-    os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-]
-# deduplicate while preserving order
-_MODEL_CHAIN = list(dict.fromkeys(_MODEL_CHAIN))
+def _call_ai(prompt: str) -> str:
+    """Call OpenRouter API with retry logic."""
+    if not OPENROUTER_API_KEY:
+        log.error("OPENROUTER_API_KEY not set")
+        raise RuntimeError("AI Configuration Missing")
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/godrej-properties/escalation-tracker", 
+        "X-Title": "Escalation Tracker Godrej",
+    }
+    
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"} if "json" in prompt.lower() else None
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        if "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0]["message"]["content"]
+        else:
+            log.error(f"Unexpected OpenRouter response: {result}")
+            raise RuntimeError("Empty response from AI")
+            
+    except Exception as exc:
+        log.error(f"OpenRouter API error: {exc}")
+        raise
 
 # ── Strict extraction prompt ──────────────────────────────────────────────────
 PROMPT_TEMPLATE = """
@@ -50,6 +78,7 @@ Rules:
 - Provide a brief reason for the assigned priority in "Priority Reason".
 - Extract the customer's name in "Customer Name". Prefer an explicit name from the email body or signature. If the body does not mention a customer name, use the sender display name. If no reliable name is available, use "Unknown".
 - Extract the customer's email address in "Customer Email". Prefer an explicit email in the body. If missing, use the sender email. If no reliable email is available, use "Unknown".
+- Extract the flat number, unit number, apartment number, or villa number mentioned in the email in "Flat Number". If not mentioned, use "Unknown".
 
 EMAIL FROM NAME:
 {EMAIL_FROM_NAME}
@@ -73,12 +102,12 @@ Required JSON format:
   "AssignedTo": "string",
   "Customer Name": "string",
   "Customer Email": "string",
+  "Flat Number": "string",
   "Issue Details": "string",
   "Priority Reason": "string"
 }}
 """
 
-# Valid enum values — used to sanitise the model's output
 VALID_PRIORITIES  = {"Fatal", "Critical", "Medium", "Low"}
 
 KNOWN_PROJECTS = [
@@ -105,14 +134,14 @@ INTERNAL_EMAIL_DOMAINS = {
 
 
 def _clean_response(text: str) -> str:
-    """Strip markdown code fences that Gemini sometimes adds despite instructions."""
+    """Strip markdown code fences."""
     text = text.strip()
     text = text.replace("```json", "").replace("```", "")
     return text.strip()
 
 
 def _validate(data: dict) -> dict:
-    """Coerce out-of-range enum values to 'Unknown' / 'Other'."""
+    """Coerce out-of-range enum values."""
     if data.get("Priority") not in VALID_PRIORITIES:
         log.warning(f"Unexpected priority '{data.get('Priority')}' — defaulting to 'Medium'")
         data["Priority"] = "Medium"
@@ -166,6 +195,21 @@ def _infer_zone(text: str) -> str:
         zone = re.split(r"[,.;\n\r]", match.group(1).strip())[0].strip()
         if zone and zone.lower() not in UNKNOWN_VALUES:
             return zone
+    return "Unknown"
+
+
+def _infer_flat_number(text: str) -> str:
+    patterns = [
+        r"\b(?:flat|unit|apt|apartment|villa|house|plot)\s*(?:no|number|#)?\s*(?:is|=|:|-)?\s*([A-Za-z0-9/ -]{1,20})",
+        r"\b([A-Z][0-9]{2,4}|[0-9]{2,4}[A-Z]|[0-9]{3,4})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        flat = match.group(1).strip()
+        if flat and flat.lower() not in UNKNOWN_VALUES:
+            return flat
     return "Unknown"
 
 
@@ -306,66 +350,28 @@ def _fallback_analysis(subject: str, body: str, from_name: str = "", from_email:
         "assignedTo":     "",
         "customerName":   customer["customerName"],
         "customerEmail":  customer["customerEmail"],
+        "flatNumber":     _infer_flat_number(source_text),
         "issueDetails":   issue[:1200],
         "priorityReason": "AI service failed, so default priority was assigned by fallback extraction."
     }
 
 
-def _call_gemini(prompt: str) -> str:
-    """Try each model in _MODEL_CHAIN. On quota errors, wait briefly and try next model."""
-    last_error = None
-    for model_name in _MODEL_CHAIN:
-        try:
-            log.info(f"Trying model: {model_name}")
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            log.info(f"Success with model: {model_name}")
-            return response.text
-        except Exception as exc:
-            last_error = exc
-            err_str = str(exc).lower()
-            if "quota" in err_str or "resource_exhausted" in err_str or "429" in err_str:
-                log.warning(f"Quota exhausted on {model_name}, trying next model...")
-                time.sleep(2)  # brief pause before fallback
-                continue
-            elif "not_found" in err_str or "404" in err_str:
-                log.warning(f"Model {model_name} not found, trying next...")
-                continue
-            else:
-                # Non-quota error — raise immediately
-                raise
-    # All models exhausted
-    raise last_error or RuntimeError("All Gemini models failed")
-
-
 def analyze_email(subject: str, body: str, from_name: str = "", from_email: str = "") -> dict:
     """
-    Call Gemini and return a normalised escalation dict:
-    {
-        "project":            str,
-        "priority":           str,
-        "type":               str,
-        "zone":               str,
-        "department":         str,
-        "assignedTo":         str,
-        "customerName":       str,
-        "customerEmail":      str,
-        "issueDetails":       str,
-        "priorityReason":     str
-    }
+    Call AI and return a normalised escalation dict.
     Never raises — returns a fallback dict on any error.
     """
     prompt = PROMPT_TEMPLATE.format(
         EMAIL_FROM_NAME=from_name or "Unknown",
         EMAIL_FROM_EMAIL=from_email or "Unknown",
         EMAIL_SUBJECT=subject or "(no subject)",
-        EMAIL_BODY=(body or "(empty body)")[:6000],  # guard against huge emails
+        EMAIL_BODY=(body or "(empty body)")[:6000], 
     )
 
     try:
-        raw_text = _call_gemini(prompt)
+        raw_text = _call_ai(prompt)
         raw = _clean_response(raw_text)
-        log.debug(f"Gemini raw response: {raw[:300]}")
+        log.debug(f"AI raw response: {raw[:300]}")
 
         data = json.loads(raw)
         data = _validate(data)
@@ -397,14 +403,15 @@ def analyze_email(subject: str, body: str, from_name: str = "", from_email: str 
             "assignedTo":     data.get("AssignedTo", ""),
             "customerName":   customer_name,
             "customerEmail":  customer_email,
+            "flatNumber":     data.get("Flat Number", "Unknown"),
             "issueDetails":   issue_details,
             "priorityReason": data.get("Priority Reason", "")
         }
 
     except json.JSONDecodeError as exc:
-        log.error(f"JSON parse error from Gemini: {exc}")
+        log.error(f"JSON parse error from AI: {exc}")
     except Exception as exc:
-        log.error(f"Gemini API error: {exc}")
+        log.error(f"AI API error: {exc}")
 
     # Fallback — always return something storable
     return _fallback_analysis(subject, body, from_name, from_email)
@@ -437,7 +444,7 @@ def rephrase_rca_capa(root_cause: str, chronology: str, corrective: str, prevent
         PREVENTIVE=preventive or "(not provided)",
     )
     try:
-        raw = _call_gemini(prompt)
+        raw = _call_ai(prompt)
         data = json.loads(_clean_response(raw))
         return {"rcaBullets": data.get("rcaBullets", []), "capaBullets": data.get("capaBullets", [])}
     except Exception as exc:
@@ -457,7 +464,7 @@ Required JSON:
 def classify_complaint(text: str) -> dict:
     prompt = CLASSIFY_PROMPT.format(TEXT=(text or "(empty)")[:4000])
     try:
-        raw = _call_gemini(prompt)
+        raw = _call_ai(prompt)
         data = json.loads(_clean_response(raw))
         sev = data.get("severity", "Medium")
         if sev not in VALID_PRIORITIES: sev = "Medium"

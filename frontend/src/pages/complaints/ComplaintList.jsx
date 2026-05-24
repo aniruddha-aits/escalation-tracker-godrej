@@ -105,6 +105,7 @@ export default function ComplaintList() {
               <tr>
                 <SortTh k="id" label="ID" />
                 <SortTh k="project" label="Project" />
+                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500">Flat No.</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500">Severity</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500">Zone</th>
@@ -132,6 +133,7 @@ export default function ComplaintList() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-700 font-medium max-w-[160px] truncate">{c.project}</td>
+                    <td className="px-4 py-3 text-xs text-slate-600 truncate max-w-[100px]">{c.flatNumber}</td>
                     <td className="px-4 py-3"><SeverityBadge severity={c.severity} /></td>
                     <td className="px-4 py-3"><StatusBadge status={slaBreach ? 'SLA Breached' : c.status} /></td>
                     <td className="px-4 py-3 text-xs text-slate-600">{c.zone}</td>

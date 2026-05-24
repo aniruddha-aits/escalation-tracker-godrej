@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Mail, RefreshCw, Sparkles, CheckCircle2, User, Tag, Building2,
-  MapPin, Zap, ExternalLink, Inbox, XCircle,
+  MapPin, Zap, ExternalLink, Inbox, XCircle, Home,
 } from 'lucide-react';
 import { Layout } from '../../components/layout/Layout';
 import { Badge } from '../../components/ui/Badge';
@@ -242,7 +242,7 @@ function RawEmailView({ email }) {
 }
 
 /* ─── AI extraction panel ───────────────────────────────────── */
-function AIExtractionView({ email, onApprove, onReject, onAssignRoute, editState, setEditState, departments, decisionAction }) {
+function AIExtractionView({ email, onApprove, onReject, onRevert, onAssignRoute, editState, setEditState, departments, decisionAction }) {
   const ai = email.aiExtracted;
   if (!ai) return null;
   const isApproved = email.aiStatus === 'queued';
@@ -288,6 +288,7 @@ function AIExtractionView({ email, onApprove, onReject, onAssignRoute, editState
         <div className="p-4 grid grid-cols-2 gap-3">
           {[
             { icon: User,      label: 'Customer',   key: 'customerName',        type: 'text' },
+            { icon: Home,      label: 'Flat Number', key: 'flatNumber',         type: 'text' },
             { icon: Tag,       label: 'Severity',   key: 'suggestedSeverity',   type: 'select', opts: ['Fatal','Critical','Medium','Low'] },
             { icon: Building2, label: 'Department', key: 'suggestedDepartment', type: 'select', opts: departments },
             { icon: MapPin,    label: 'Zone',       key: 'suggestedZone',       type: 'text' },
@@ -405,9 +406,20 @@ function AIExtractionView({ email, onApprove, onReject, onAssignRoute, editState
       )}
 
       {isRejected && (
-        <div className="flex items-center gap-2 justify-center p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold">
-          <XCircle className="w-4 h-4" />
-          Rejected
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 justify-center p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold">
+            <XCircle className="w-4 h-4" />
+            Rejected
+          </div>
+          <Button 
+            variant="secondary" 
+            className="w-full justify-center" 
+            onClick={onRevert}
+            disabled={decisionPending}
+          >
+            <RefreshCw className="w-4 h-4" />
+            {decisionAction?.type === 'revert' ? 'Reverting...' : 'Revert to Inbox'}
+          </Button>
         </div>
       )}
     </div>
@@ -431,6 +443,7 @@ function getEditState(email) {
   return {
     customerName:        ai.customerName ?? '',
     customerEmail:       ai.customerEmail ?? '',
+    flatNumber:          ai.flatNumber ?? '',
     suggestedSeverity:   ai.suggestedSeverity ?? ai.priority ?? 'Medium',
     suggestedDepartment: ai.suggestedDepartment ?? ai.department ?? '',
     suggestedZone:       ai.suggestedZone ?? ai.zone ?? '',
@@ -457,6 +470,7 @@ export default function EmailInbox() {
   const [departments, setDepartments] = useState([]);
   const [users, setUsers] = useState([]);
   const [assignModal, setAssignModal] = useState(false);
+  const [rejectModal, setRejectModal] = useState(false);
   const [selectedDept, setSelectedDept] = useState('');
   const [selectedUser, setSelectedUser] = useState('');
 
@@ -526,6 +540,7 @@ export default function EmailInbox() {
         const extracted = {
           customerName: ai.customerName || '',
           customerEmail: ai.customerEmail || '',
+          flatNumber: ai.flatNumber || 'Unknown',
           project: ai.project || 'Unknown',
           issueDetails: ai.issueDetails || '',
           keywords: ai.keywords || [],
@@ -543,6 +558,7 @@ export default function EmailInbox() {
           setEditState({
             customerName: extracted.customerName,
             customerEmail: extracted.customerEmail,
+            flatNumber: extracted.flatNumber,
             suggestedSeverity: extracted.suggestedSeverity,
             suggestedDepartment: extracted.suggestedDepartment,
             suggestedZone: extracted.suggestedZone,
@@ -576,6 +592,7 @@ export default function EmailInbox() {
       department: route.department || editState.suggestedDepartment || ai.suggestedDepartment,
       issueDetails: editState.issueDetails || ai.issueDetails,
       customerName: editState.customerName || ai.customerName,
+      flatNumber: editState.flatNumber || ai.flatNumber,
     });
     if (!res.success) return null;
     const compId = res.complaintId;
@@ -623,7 +640,11 @@ export default function EmailInbox() {
     finally { setDecisionAction(null); }
   };
 
-  const handleRejectEmail = async () => {
+  const handleRejectEmail = () => {
+    setRejectModal(true);
+  };
+
+  const executeReject = async () => {
     if (!selected) return;
     setDecisionAction({ id: selected.id, type: 'reject' });
     try {
@@ -631,8 +652,37 @@ export default function EmailInbox() {
       if (res.success) {
         setEmails(prev => prev.map(e => e.id === selected.id ? { ...e, aiStatus: 'rejected' } : e));
         setSelected(prev => prev ? { ...prev, aiStatus: 'rejected' } : prev);
+        setRejectModal(false);
       }
     } catch (err) { console.error('Reject email error:', err); }
+    finally { setDecisionAction(null); }
+  };
+
+  const handleRevertEmail = async () => {
+    if (!selected) return;
+    setDecisionAction({ id: selected.id, type: 'revert' });
+    try {
+      const res = await emailsAPI.revert(selected.id);
+      if (res.success) {
+        // Re-fetch or locally update. Locally update is faster.
+        // We don't know the exact previous status, but executeRevert in backend sets it 
+        // based on ai_data. We can just re-fetch all emails to be sure, or mimic logic.
+        const allRes = await emailsAPI.getAll();
+        if (allRes.success) {
+          const mapped = (allRes.data || []).map(e => ({
+            id: e.id, from: e.from_email, fromName: e.from_name || e.from_email,
+            to: 'complaints@godrejproperties.com', cc: [],
+            subject: e.subject, body: e.body || '', receivedAt: e.received_at,
+            source: e.source || 'Email', aiStatus: e.status || 'pending',
+            aiExtracted: e.ai_data && Object.keys(e.ai_data).length > 0 ? e.ai_data : null,
+            queuedAsComplaintId: e.complaint_id || null,
+          }));
+          setEmails(mapped);
+          const updated = mapped.find(e => e.id === selected.id);
+          if (updated) setSelected(updated);
+        }
+      }
+    } catch (err) { console.error('Revert email error:', err); }
     finally { setDecisionAction(null); }
   };
 
@@ -834,6 +884,7 @@ export default function EmailInbox() {
                       email={liveSelected}
                       onApprove={handleApproveEmail}
                       onReject={handleRejectEmail}
+                      onRevert={handleRevertEmail}
                       onAssignRoute={openAssignRouteModal}
                       editState={editState}
                       setEditState={setEditState}
@@ -846,6 +897,23 @@ export default function EmailInbox() {
                       <Sparkles className="w-8 h-8 text-slate-200 mb-3" />
                       <p className="text-sm font-medium text-slate-500">Email not yet processed</p>
                       <p className="text-xs text-slate-400 mt-1">Click "Process with AI" to extract structured data</p>
+                    </div>
+                  )}
+                  {liveSelected.aiStatus === 'rejected' && activeTab === 'raw' && (
+                    <div className="mt-4 p-4 bg-red-50 border border-red-100 rounded-xl flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-red-700 text-xs font-semibold">
+                        <XCircle className="w-4 h-4" />
+                        This email is currently rejected
+                      </div>
+                      <Button 
+                        variant="secondary" 
+                        size="sm" 
+                        onClick={handleRevertEmail}
+                        disabled={decisionAction?.id === liveSelected.id}
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        {decisionAction?.type === 'revert' ? 'Reverting...' : 'Revert to Inbox'}
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -899,6 +967,30 @@ export default function EmailInbox() {
             <Button variant="secondary" onClick={() => setAssignModal(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleAssignRoute} disabled={!selectedUser || decisionAction?.type === 'assign'}>
               {decisionAction?.type === 'assign' ? 'Assigning...' : 'Confirm Assignment'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={rejectModal} onClose={() => setRejectModal(false)} title="Confirm Rejection" size="sm">
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 text-red-600 mb-2">
+            <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center">
+              <XCircle className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm font-bold">Are you sure?</p>
+              <p className="text-[10px] text-slate-500">This action cannot be undone easily.</p>
+            </div>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            You are about to reject this email from <span className="font-semibold text-slate-800">{liveSelected?.fromName}</span>. 
+            Rejected emails will be marked as "Rejected" and will not be processed into the complaint queue.
+          </p>
+          <div className="flex gap-2 pt-2 justify-end">
+            <Button variant="secondary" onClick={() => setRejectModal(false)}>Cancel</Button>
+            <Button variant="danger" onClick={executeReject} disabled={decisionAction?.type === 'reject'}>
+              {decisionAction?.type === 'reject' ? 'Rejecting...' : 'Confirm Rejection'}
             </Button>
           </div>
         </div>

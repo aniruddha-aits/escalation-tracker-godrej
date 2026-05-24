@@ -30,7 +30,8 @@ def init_db():
             source TEXT DEFAULT 'Email', raised_on TEXT, zone TEXT, issue_details TEXT,
             notes TEXT, status TEXT DEFAULT 'Pending Validation', department TEXT,
             assigned_to TEXT, watchers TEXT DEFAULT '[]', mail_thread TEXT,
-            customer_name TEXT, customer_email TEXT, ai_extracted TEXT DEFAULT '{}',
+            customer_name TEXT, customer_email TEXT, flat_number TEXT,
+            ai_extracted TEXT DEFAULT '{}',
             validated_by TEXT, validated_at TEXT, sla_started TEXT, rca_due TEXT,
             closure_due TEXT, actions TEXT DEFAULT '[]', cbe_date TEXT,
             rca TEXT, capa TEXT, closure_status TEXT, customer_confirmation TEXT,
@@ -65,6 +66,7 @@ def init_db():
             ("cbe_submitted_by", "TEXT"),
             ("cbe_approved_by", "TEXT"),
             ("cbe_approved_at", "TEXT"),
+            ("flat_number", "TEXT"),
         ]:
             try:
                 c.execute(f"ALTER TABLE complaints ADD COLUMN {col} {defn}")
@@ -151,6 +153,7 @@ def _row_to_complaint(row):
         mailThread=row["mail_thread"],
         customerName=row["customer_name"] or "",
         customerEmail=row["customer_email"] or "",
+        flatNumber=row["flat_number"] or "",
         aiExtracted=_json_loads(row["ai_extracted"]),
         validatedBy=row["validated_by"], validatedAt=row["validated_at"],
         slaStarted=row["sla_started"], rcaDue=row["rca_due"],
@@ -183,11 +186,11 @@ def create_complaint(data):
     with get_connection() as c:
         c.execute("""INSERT INTO complaints (id,project,type,severity,source,raised_on,zone,
             issue_details,notes,status,department,assigned_to,assigned_by,watchers,mail_thread,
-            customer_name,customer_email,ai_extracted,validated_by,validated_at,
+            customer_name,customer_email,flat_number,ai_extracted,validated_by,validated_at,
             sla_started,rca_due,closure_due,actions,cbe_date,cbe_status,cbe_submitted_by,
             cbe_approved_by,cbe_approved_at,rca,capa,
             closure_status,customer_confirmation,closure_method)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (cid, data.get("project",""), data.get("type",""), severity,
              data.get("source","Email"), data.get("raisedOn") or now,
              data.get("zone",""), data.get("issueDetails",""), data.get("notes",""),
@@ -195,7 +198,8 @@ def create_complaint(data):
               data.get("assignedTo"), data.get("assignedBy"),
               json.dumps(data.get("watchers",[])),
               data.get("mailThread"), data.get("customerName",""),
-              data.get("customerEmail",""), json.dumps(data.get("aiExtracted",{})),
+              data.get("customerEmail",""), data.get("flatNumber",""),
+              json.dumps(data.get("aiExtracted",{})),
               data.get("validatedBy"), data.get("validatedAt"),
               sla_started, rca_due, closure_due,
               json.dumps(data.get("actions",[])), data.get("cbeDate"),
@@ -239,6 +243,7 @@ def update_complaint(cid, updates):
         "assignedTo":"assigned_to","assignedBy":"assigned_by",
         "mailThread":"mail_thread",
         "customerName":"customer_name","customerEmail":"customer_email",
+        "flatNumber":"flat_number",
         "validatedBy":"validated_by","validatedAt":"validated_at",
         "slaStarted":"sla_started","rcaDue":"rca_due","closureDue":"closure_due",
         "cbeDate":"cbe_date","cbeStatus":"cbe_status",
@@ -330,6 +335,15 @@ def mark_email_processed(eid):
 
 def reject_email(eid):
     update_email_status(eid, "rejected")
+
+def revert_email(eid):
+    with get_connection() as c:
+        row = c.execute("SELECT ai_data FROM emails WHERE id=?", (eid,)).fetchone()
+        if not row: return
+        ai_data = _json_loads(row["ai_data"])
+        status = "extracted" if ai_data and len(ai_data) > 0 else "pending"
+        c.execute("UPDATE emails SET status=?, processed_at=NULL WHERE id=?", (status, eid))
+        c.commit()
 
 # ── Notification helpers ──
 def create_notification(ntype, complaint_id="", user_id="", title="", message="", severity="Medium"):

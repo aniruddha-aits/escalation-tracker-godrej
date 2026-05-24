@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, MapPin, Calendar, Clock, Tag, User, Building2, Mail,
   MessageSquare, CheckCircle2, AlertCircle, Send, Paperclip, ExternalLink,
-  Save, XCircle, ThumbsUp,
+  Save, XCircle, ThumbsUp, Home,
 } from 'lucide-react';
 import { Layout } from '../../components/layout/Layout';
 import { SeverityBadge, StatusBadge, Badge } from '../../components/ui/Badge';
@@ -282,6 +282,7 @@ export default function ComplaintDetail() {
         <div className="space-y-4">
           <Card className="p-5 space-y-4">
             <InfoRow icon={Calendar}  label="Raised On"    value={c.raisedOn ? format(new Date(c.raisedOn), 'dd MMM yyyy, HH:mm') : '—'} />
+            <InfoRow icon={Home}      label="Flat Number"  value={c.flatNumber} />
             <InfoRow icon={MapPin}    label="Zone"         value={c.zone} />
             <InfoRow icon={Tag}       label="Source"       value={c.source} />
             <InfoRow icon={Building2} label="Department"   value={c.department} />

@@ -446,6 +446,7 @@ def api_send_to_queue(eid):
         "slaStarted": em.get("received_at") or now.isoformat(),
         "customerName": overrides.get("customerName") or ai.get("customerName",""),
         "customerEmail": em.get("from_email",""),
+        "flatNumber": overrides.get("flatNumber") or ai.get("flatNumber",""),
         "aiExtracted": {"keywords": ai.get("keywords",[]), "confidence": ai.get("confidence",0.8),
                         "suggestedSeverity": ai.get("priority","Medium"),
                         "suggestedDepartment": ai.get("department","Other")},
@@ -458,6 +459,12 @@ def api_send_to_queue(eid):
 def api_reject_email(eid):
     database.reject_email(eid)
     return jsonify({"success": True, "message": "Email rejected"})
+
+@app.route("/api/emails/<eid>/revert", methods=["POST"])
+@token_required
+def api_revert_email(eid):
+    database.revert_email(eid)
+    return jsonify({"success": True, "message": "Email reverted to inbox"})
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 

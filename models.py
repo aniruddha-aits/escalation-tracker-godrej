@@ -60,6 +60,7 @@ class Complaint:
     mailThread: Optional[str] = None
     customerName: str = ""
     customerEmail: str = ""
+    flatNumber: str = ""
     aiExtracted: Optional[dict] = None
     validatedBy: Optional[str] = None
     validatedAt: Optional[str] = None
@@ -98,6 +99,7 @@ class Complaint:
             "mailThread": self.mailThread,
             "customerName": self.customerName,
             "customerEmail": self.customerEmail,
+            "flatNumber": self.flatNumber,
             "aiExtracted": self.aiExtracted,
             "validatedBy": self.validatedBy,
             "validatedAt": self.validatedAt,

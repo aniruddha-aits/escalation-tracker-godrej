@@ -77,6 +77,7 @@ export const emailsAPI = {
   processAI: (id) => request(`/api/emails/${id}/process-ai`, { method: 'POST' }),
   sendToQueue: (id, data) => request(`/api/emails/${id}/send-to-queue`, { method: 'POST', body: JSON.stringify(data || {}) }),
   reject: (id) => request(`/api/emails/${id}/reject`, { method: 'POST' }),
+  revert: (id) => request(`/api/emails/${id}/revert`, { method: 'POST' }),
 };
 
 // ── Notifications ──
